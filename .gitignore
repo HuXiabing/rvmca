@@ -1,0 +1,9 @@
+.idea/
+__pycache__/
+.VSCodeCounter/
+
+output/
+.vscode/
+dev.env
+/report/
+*.html
