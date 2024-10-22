@@ -138,12 +138,6 @@ class ProgramParseListener(ProgramListener):
             inst.label = label.getText()
         self.program.insts.append(inst)
 
-    def enterBranch_pseudo_inst(self, ctx: ProgramParser.Branch_pseudo_instContext):
-        # TODO: to be implemented
-        name, rs1, label = ctx.BRANCH_PSEUDO_NAME().getText(), ctx.REG().getText(), ctx.LABEL().getText()
-        # inst = BFmtInst(name, rs1, None, None, label)
-        # self.program.insts.append(inst)
-
     def enterJfmt(self, ctx: ProgramParser.JfmtContext):
         rd, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
         inst = JFmtInst('jal', rd)

@@ -268,6 +268,7 @@ class BFmtInst(Inst):
 
     def mnemonic(self, operands):
         rs1, rs2, imm = operands
+
         # TODO: add other pseudo branch insts
         if self.name == 'bnez':
             return f'{self.name} {rs1}, {self.label}'

@@ -102,3 +102,5 @@ HERD7_PATH = os.path.join(TOOL_DIR, 'herdtools', GLIBC_VERSION, 'herd7')
 #
 OUTPUT_DIR = os.path.join(CUR_DIR, "../../output")
 dir_util.mk_dir_from_dir_path(OUTPUT_DIR)
+
+TEST_DIR = os.path.join(CUR_DIR, "../../tests")

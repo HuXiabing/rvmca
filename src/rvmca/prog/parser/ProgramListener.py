@@ -170,15 +170,6 @@ class ProgramListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by ProgramParser#branch_pseudo_inst.
-    def enterBranch_pseudo_inst(self, ctx:ProgramParser.Branch_pseudo_instContext):
-        pass
-
-    # Exit a parse tree produced by ProgramParser#branch_pseudo_inst.
-    def exitBranch_pseudo_inst(self, ctx:ProgramParser.Branch_pseudo_instContext):
-        pass
-
-
     # Enter a parse tree produced by ProgramParser#inst_mem_access.
     def enterInst_mem_access(self, ctx:ProgramParser.Inst_mem_accessContext):
         pass

@@ -22,6 +22,8 @@
 """Test for RISC-V Program Parser"""
 from rvmca.analysis import CFG, path_to_ssa, cfg_to_ssa
 from rvmca.prog import *
+from rvmca.utils.file_util import *
+from rvmca.config import *
 
 
 class TestProg:
@@ -53,3 +55,10 @@ class TestProg:
         i2s = cfg_to_ssa(cfg)
         for i in program.insts:
             print(f'{i} -> {i2s[i]}')
+
+    def test_400_perlbench(self):
+        directory = os.path.join(TEST_DIR, 'input/spec06/400_perlbench')
+        for file in list_files(directory, '.S'):
+            content = read_file(file)+'\n'
+            program = parse_program(content)
+            print(program)
