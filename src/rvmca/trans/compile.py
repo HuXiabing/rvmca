@@ -32,3 +32,17 @@ def compile_block(program: Program, bin_name: str):
     wrapper = wrapper.replace('#CODE#', program.code)
     write_to_file(f'{OUTPUT_PATH / bin_name}.S', wrapper, append=False)
     run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / bin_name}.S -o {OUTPUT_PATH / bin_name}')
+
+
+def assemble_code(code: str, name: str = 'test'):
+    """Output a file named {name}.code"""
+    write_to_file(f'{OUTPUT_PATH / name}.S', code, append=False)
+    run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / name}.S -c -o {OUTPUT_PATH / name}.o')
+    output = run_cmd(f'{RISCV_OBJDUMP} -d {OUTPUT_PATH / name}.o')
+
+    import re
+    pattern = r'^\s*[0-9a-f]+:\s+(.*)'
+    # pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
+    machine_code = '\n'.join(re.findall(pattern, output, re.MULTILINE))
+    write_to_file(f'{OUTPUT_PATH / name}.code', machine_code, append=False)
+    return machine_code

@@ -24,7 +24,7 @@
 
 from typing import List, Tuple
 
-from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst
+from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, JalrInst
 import copy
 import angr, claripy
 from rvmca.config import *
@@ -37,19 +37,47 @@ def _check_block_validity(prog: Program):
         assert inst.type not in [IType.Branch, IType.Jump], f"{prog.insts} is not a basic block"
 
 
-def zero_imm_for_block(prog: Program) -> Program:
-    """Zero the immediate in a block"""
+def _legalize_branch(inst: Inst) -> Inst:
+    assert inst.type is IType.Branch
+    new_inst = copy.deepcopy(inst)
+    new_inst.imm = 4
+    return new_inst
+
+
+def _legalize_jump(inst: Inst) -> Inst:
+    assert inst.type is IType.Jump
+    from rvmca.prog.inst import BFmtInst, JalrInst, JFmtInst
+    if isinstance(inst, JalrInst):
+        new_inst = BFmtInst('beq', inst.rd.name, inst.rs1.name, 4)
+    elif isinstance(inst, JFmtInst):
+        new_inst = BFmtInst('bne', inst.rd.name, inst.rd.name, 4)
+    else:
+        raise NotImplementedError
+    return new_inst
+
+
+def legalize_jump_and_branch(prog: Program) -> Program:
+    """Legalize jump and branch for a block"""
     _check_block_validity(prog)
 
     prog = copy.deepcopy(prog)
 
-    for inst in prog.insts:
-        if hasattr(inst, 'imm'):
-            if inst.type is IType.Branch:
-                inst.imm = 4
-            else:
-                inst.imm = 0
+    if prog.insts[-1].type is IType.Jump:
+        prog.insts[-1] = _legalize_jump(prog.insts[-1])
+    elif prog.insts[-1].type is IType.Branch:
+        prog.insts[-1] = _legalize_branch(prog.insts[-1])
 
+    return prog
+
+
+def zero_imm_for_block(prog: Program) -> Program:
+    """Zero the immediate in a block"""
+    _check_block_validity(prog)
+    prog = copy.deepcopy(prog)
+    for idx, inst in enumerate(prog.insts):
+        if hasattr(inst, 'imm') \
+                and inst.type not in [IType.Branch, IType.Jump]:
+            inst.imm = 0
     return prog
 
 
@@ -151,26 +179,14 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
     """generate init code for a block"""
     STACK_RANGE = 0xf00
     regs_defined = {XREG[0], XREG[2]}  # x0, sp
-    regs_undefined, regs_addr_undefined = set(), set()
+    regs_undefined, insts_addr_undefined = set(), set()
     init_code = []
-
-    # collect undefined registers
-    for i, inst in enumerate(prog.insts):
-        for r in inst.get_uses():
-            if r not in regs_defined:
-                if inst.get_addr() == r:
-                    regs_addr_undefined.add(r)
-                else:
-                    regs_undefined.add(r)
-        r = inst.get_def()
-        if r:
-            regs_defined.add(r)
 
     # compile and load binary
     compile_block(prog, filename)
     proj = angr.Project(OUTPUT_PATH / filename, auto_load_libs=False)
     begin_addr = proj.loader.main_object.get_symbol('rvmca_block_begin')
-    end_addr = proj.loader.main_object.get_symbol('rvmca_block_end')
+    end_addr = begin_addr.rebased_addr
     init_state = proj.factory.blank_state(addr=begin_addr.rebased_addr,
                                           add_options={angr.options.SYMBOLIC_WRITE_ADDRESSES,
                                                        angr.options.MEMORY_SYMBOLIC_BYTES_MAP,
@@ -180,6 +196,22 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
                                                        angr.options.CONSERVATIVE_READ_STRATEGY,
                                                        angr.options.UNICORN_HANDLE_SYMBOLIC_ADDRESSES})
 
+    from rvmca.prog import IFmtInst, UFmtInst, RFmtInst
+    init_sp = init_state.regs.sp
+
+    # collect undefined registers
+    for inst in prog.insts:
+        for r in inst.get_uses():
+            if r not in regs_defined:
+                if inst.get_addr() == r:
+                    insts_addr_undefined.add(inst)
+                    regs_defined.add(r)
+                else:
+                    regs_undefined.add(r)
+        r = inst.get_def()
+        if r:
+            regs_defined.add(r)
+
     # create variables for undefined registers
     reg_vars = {}
     for reg_name in [r.name for r in regs_undefined]:
@@ -188,20 +220,17 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
         reg_vars[reg_name] = reg_var
 
     # assign sp+offset to undefined address registers
-    from rvmca.prog import IFmtInst
-    init_sp = init_state.regs.sp
-    for i, r in enumerate(regs_addr_undefined):
-        offset = -8 * (i + 1)
-        setattr(init_state.regs, r.name, init_sp + offset)
-        init_code.append(IFmtInst('addi', r.name, 'sp', offset), )
+    for i, inst in enumerate(insts_addr_undefined):
+        reg_name = inst.get_addr().name
+        offset = -8 * (i + 1) - inst.imm
+        setattr(init_state.regs, reg_name, init_sp + offset)
+        init_code.append(IFmtInst('addi', reg_name, 'sp', offset))
 
     # create a simulation manager
     simgr = proj.factory.simulation_manager(init_state)
     addr_constraints = []
 
     for i, inst in enumerate(prog.insts):
-        if inst.type in [IType.Branch, IType.Jump]:
-            break
         addr_reg = inst.get_addr()
         if addr_reg:
             addr_var = getattr(simgr.one_active.regs, addr_reg.name)
@@ -212,21 +241,24 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
             addr_constraints.append(address >= init_sp - STACK_RANGE)
             addr_constraints.append(address <= init_sp)
         simgr.step(num_inst=1)
+        # TODO: consider compressed instructions
+        end_addr += 4
 
-    # TODO: handle jump instructions
-    simgr.explore(find=end_addr.rebased_addr)
+    simgr.explore(find=end_addr)
     assert simgr.found
 
     solver = claripy.Solver()
     solver.add(simgr.found[0].solver.constraints)
     solver.add(addr_constraints)
 
-    from rvmca.prog import UFmtInst
     for k, v in reg_vars.items():
         val = solver.max(v)
-        offset = init_sp - val
-        if offset.concrete_value <= STACK_RANGE:
-            init_code.append(IFmtInst('addi', k, 'sp', offset.concrete_value))
+        offset = (init_sp - val).concrete_value
+        if 0 <= offset <= 0xf00:
+            init_code.append(IFmtInst('addi', k, 'sp', -offset))
+        elif 0 <= offset <= STACK_RANGE:
+            init_code.append(UFmtInst('li', k, -offset))
+            init_code.append(RFmtInst('add', k, k, 'sp'))
         else:
             init_code.append(UFmtInst('li', k, val))
 

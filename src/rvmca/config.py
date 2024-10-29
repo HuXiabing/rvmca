@@ -101,3 +101,4 @@ INPUT_PATH = TESTS_PATH / 'input'
 
 RISCV_TOOLCHAIN = 'riscv64-unknown-linux-gnu-'
 RISCV_GCC = RISCV_TOOLCHAIN + 'gcc'
+RISCV_OBJDUMP = RISCV_TOOLCHAIN + 'objdump'

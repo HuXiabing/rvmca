@@ -1,5 +1,6 @@
 .pytest_cache
 output/**
+input/**
 *.pclprof
 Source.gv
 Source.gv.svg

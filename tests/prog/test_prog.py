@@ -22,6 +22,7 @@
 """Test for RISC-V Program Parser"""
 from rvmca.trans.block import *
 from rvmca.prog import *
+from rvmca.trans.compile import assemble_code
 from rvmca.utils.file_util import *
 from rvmca.config import *
 
@@ -30,8 +31,8 @@ available_regs = [
     find_reg_by_name(n)
     for n in [
         'x0',
-        # 't0', 't1', 't2', 't3', 't4', 't5', 't6',
-        'a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+        't0', 't1', 't2', 't3', 't4', 't5', 't6',
+        'a0', 'a1', 'a2', 'a3', 'a4', 'a6', 'a7']
 ]
 
 
@@ -42,28 +43,6 @@ class TestProg:
                'add x2, x2, x2'
         program = parse_program(text)
         print(program.insts)
-
-    def test2(self):
-        text = 'li x1, 5' \
-               'addi x2, x1, 1' \
-               'add x2, x2, x2'
-        program = parse_program(text)
-        cfg = CFG(program.insts)
-        paths = cfg.find_all_paths()
-        for p in paths:
-            ssa = path_to_ssa(p)
-            print(ssa)
-
-    def test3(self):
-        # TODO:
-        text = 'li x1, 5' \
-               'addi x2, x1, 1' \
-               'add x2, x2, x2'
-        program = parse_program(text)
-        cfg = CFG(program.insts)
-        i2s = cfg_to_ssa(cfg)
-        for i in program.insts:
-            print(f'{i} -> {i2s[i]}')
 
     def test_400_perlbench(self):
         directory = INPUT_PATH / 'spec06' / '400_perlbench'
@@ -105,5 +84,18 @@ class TestProg:
         prog = parse_program(content)
         prog = remap_regs_for_block(prog, available_regs)
         # prog = zero_imm_for_block(prog)
-        init_code = init_regs_for_block(prog)
-        print(init_code)
+        prog = legalize_jump_and_branch(prog)
+        init_insts = init_regs_for_block(prog)
+        code = [inst.code for inst in init_insts]
+        code.append('rdcycle a5')
+        code.extend([inst.code for inst in prog.insts])
+        print(prog.code)
+        assemble_code('\n'.join(code), 'test')
+
+    def test_parser(self):
+        directory = INPUT_PATH / 'dv'
+        for file in list_files(directory, '.S'):
+            content = read_file(file) + '\n'
+            parse_program(content)
+
+
