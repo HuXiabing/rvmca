@@ -90,6 +90,24 @@ class Inst:
         """Get the used registers (the source registers)."""
         raise NotImplementedError
 
+    def set_def(self, r: Reg):
+        """Set the defined register (the destination register)."""
+        raise NotImplementedError
+
+    def set_uses(self, regs: List[Reg]):
+        """Set the used registers (the source registers)."""
+        raise NotImplementedError
+
+    def get_regs(self) -> Optional[List[Reg]]:
+        """Get all registers in operands."""
+        regs = []
+        defs, uses = self.get_def(), self.get_uses()
+        if defs:
+            regs.append(defs)
+        if uses:
+            regs.extend(uses)
+        return regs
+
     def get_addr(self) -> Optional[Reg]:
         """Get the address register (only for memory access instructions)."""
         return None
@@ -104,6 +122,10 @@ class Inst:
 
     def __repr__(self):
         return f'<0x{"{:0>2X}".format(self.pc)}> {self.mnemonic(self.operands)}'
+
+    @property
+    def code(self):
+        return self.mnemonic(self.operands)
 
 
 class RFmtInst(Inst):
@@ -122,6 +144,13 @@ class RFmtInst(Inst):
 
     def get_uses(self):
         return [self.rs1, self.rs2]
+
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1, self.rs2 = regs[0], regs[1]
 
     def mnemonic(self, operands):
         rd, rs1, rs2 = operands
@@ -144,9 +173,15 @@ class UFmtInst(Inst):
     def get_uses(self):
         return []
 
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        pass
+
     def mnemonic(self, operands):
         rd, imm = operands
-        return f'{self.name} {rd}, {imm}'
+        return f'{self.name} {rd}, {hex(imm)}'
 
 
 class AmoInst(Inst):
@@ -185,6 +220,13 @@ class AmoInst(Inst):
 
     def get_uses(self):
         return [self.rs1, self.rs2]
+
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1, self.rs2 = regs[0], regs[1]
 
     def get_data(self):
         return self.rs2
@@ -227,6 +269,13 @@ class IFmtInst(Inst):
     def get_uses(self):
         return [self.rs1]
 
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1 = regs[0]
+
     def mnemonic(self, operands):
         rd, rs1, imm = operands
         return f'{self.name} {rd}, {rs1}, {imm}'
@@ -258,6 +307,13 @@ class BFmtInst(Inst):
     def get_uses(self):
         return [self.rs1, self.rs2]
 
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1, self.rs2 = regs[0], regs[1]
+
     @property
     def tgt_pc(self):
         return self.pc + self.imm
@@ -268,13 +324,7 @@ class BFmtInst(Inst):
 
     def mnemonic(self, operands):
         rs1, rs2, imm = operands
-
-        # TODO: add other pseudo branch insts
-        if self.name == 'bnez':
-            return f'{self.name} {rs1}, {self.label}'
-        else:
-            return f'{self.name} {rs1}, {rs2}, {self.label}'
-        # return f'{self.name} {rs1}, {rs2}, {imm} #<{hex(self.tgt_pc)}>'
+        return f'{self.name} {rs1}, {rs2}, {self.imm}'
 
 
 class LABEL_POS(Enum):
@@ -303,6 +353,12 @@ class JFmtInst(Inst):
 
     def get_uses(self):
         return []
+
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        pass
 
     @property
     def tgt_pc(self):
@@ -381,6 +437,13 @@ class LoadInst(MemoryAccessInst):
     def get_uses(self):
         return [self.rs1]
 
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1 = regs[0]
+
     def mnemonic(self, operands):
         rd, rs1, imm = operands
         return f'{self.name} {rd}, {imm}({rs1})'
@@ -407,6 +470,13 @@ class StoreInst(MemoryAccessInst):
 
     def get_uses(self):
         return [self.rs1, self.rs2]
+
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1, self.rs2 = regs[0], regs[1]
 
     def get_data(self):
         return self.rs2
@@ -453,6 +523,12 @@ class MemAccessInst(Inst):
     def get_uses(self):
         return []
 
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        pass
+
     def mnemonic(self, operands):
         return f'{self.name} {self.mem_access_op}'
 
@@ -482,6 +558,12 @@ class FenceInst(Inst):
     def get_uses(self):
         return []
 
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        pass
+
     def mnemonic(self, operands):
         return f'{self.name} {self.pre}, {self.suc}'
 
@@ -505,6 +587,12 @@ class FenceTsoInst(Inst):
     def get_uses(self):
         return []
 
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        pass
+
     def mnemonic(self, operands):
         return f'{self.name}'
 
@@ -527,6 +615,12 @@ class FenceIInst(Inst):
     def get_uses(self):
         return []
 
+    def set_def(self, r: Reg):
+        pass
+
+    def set_uses(self, regs: List[Reg]):
+        pass
+
     def mnemonic(self, operands):
         return f'{self.name}'
 
@@ -548,6 +642,13 @@ class JalrInst(Inst):
 
     def get_uses(self):
         return [self.rs1]
+
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1 = regs[0]
 
     @property
     def tgt_id(self):
@@ -579,7 +680,7 @@ class SSAInst:
     def __init__(self, inst: Inst, idx: int = -1, rmap=None):
         self.inst = inst
         self.branch_taken = None
-        self.sc_succeed = None # for sc
+        self.sc_succeed = None  # for sc
         self.rmap = {} if rmap is None else rmap  # reg -> BitVec
         self.idx = idx
 

@@ -22,4 +22,4 @@
 
 from rvmca.prog.inst import *
 from rvmca.prog.prog import Program, parse_program
-from rvmca.prog.reg import *
+from rvmca.prog.reg import Reg, XREG, FREG

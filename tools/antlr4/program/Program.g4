@@ -7,7 +7,7 @@ options { language=Python3; }
 
 // each statetement is supposed to have an ending ';'
 prog : (label | inst)+ ;
-inst : (rfmt | ifmt | mfmt | bfmt | jfmt | ufmt | amofmt | pseudo | inst_fence | inst_fencetso | inst_fencei | inst_mem_access) ';'? ;
+inst : (rfmt | ifmt | mfmt | bfmt | jfmt | ufmt | amofmt | pseudo | inst_fence | inst_fencetso | inst_fencei) ';'? ;
 label: LABEL ':' ';'?;
 
 // TODO: here is an workaround for 'or' inst parsing (actually it is a bug of current Antlr4)
@@ -16,29 +16,32 @@ ifmt: I_FMT_NAME REG ',' REG ',' IMM ;
 // sw.rl /home/apr/tools/mappo/dataset/input/dataset_riscv_litmus/ATOMICS/RELAX/PodRWPX/LB+poprl+popx_has_ppo_0.litmus sw.rl
 //mfmt: (LD_NAME(MO_FLAG)? | SD_NAME(MO_FLAG)? | JALR) REG ',' IMM '(' REG ')' ;
 mfmt: (LD_NAME | SD_NAME | JALR) REG ',' IMM '(' REG ')' ;
-bfmt: B_FMT_NAME REG ',' REG ',' (LABEL | IMM);
+bfmt: (B_FMT_NAME | BRANCH_PSEUDO_NAME) REG ',' REG ',' (LABEL | IMM);
 jfmt: 'jal' REG ',' (LABEL | IMM)  ;
 ufmt: U_FMT_NAME REG ',' IMM ;
 amofmt: AMO_NAME(MO_FLAG)? REG ',' REG ',' IMM?'(' REG ')';
-pseudo : inst_j | inst_jr | inst_nop;
+pseudo : inst_j | inst_jr | inst_nop | inst_bz | inst_mv | inst_ret;
 
+inst_bz: BRANCH_PSEUDO_NAME  REG ',' (LABEL | IMM);
 inst_j: 'j' (LABEL | IMM) ;
 inst_jr: 'jr' REG ;
+inst_mv: 'mv' REG ',' REG ;
 inst_nop: 'nop' ;
+inst_ret: 'ret' ;
 inst_fence: ('fence' mem_access_op ',' mem_access_op) | fence_single;
 inst_fencetso : 'fence.tso' ;
 fence_single:'fence';
 inst_fencei: 'fence.i' ;
-inst_mem_access: 'mem' mem_access_op;
 mem_access_op: FENCE_OP| mem_access_op_single;
 mem_access_op_single: ('r' | 'w' | 'rw');
 FENCE_OP: ('i' | 'o' |'io')?('r' | 'w' | 'rw');
 
+BRANCH_PSEUDO_NAME: 'bnez' | 'beqz' | 'blez' | 'bgez' | 'bltz' | 'bgtz';
 JALR: 'jalr' ;
 
 R_FMT_NAME : 'add' | 'addw' | 'and' | 'div' | 'divu' | 'divuw' | 'divw'  | 'mul' | 'mulh' | 'mulhsu' | 'mulhu' | 'mulw' | 'rem' | 'remu' | 'remuw' | 'remw'  | 'sll' | 'sllw' | 'slt' | 'sltu' | 'sra' | 'sraw' | 'srl' | 'srlw' | 'sub' | 'subw' | 'xor' ;
 I_FMT_NAME : 'addi' | 'addiw' | 'andi' | 'ori' | 'slli' | 'slliw' | 'slti' | 'sltiu' | 'srai' | 'sraiw' | 'srli' | 'srliw' | 'xori' ;
-B_FMT_NAME: 'beq' | 'bge' | 'bgeu' | 'blt' | 'bltu' | 'bne' | 'bnez' | 'beqz' | 'blez' | 'bgez' | 'bltz' | 'bgtz' | 'bgt';
+B_FMT_NAME: 'beq' | 'bge' | 'bgeu' | 'blt' | 'bltu' | 'bne' | 'bgt';
 U_FMT_NAME: 'auipc' | 'lui' | 'li';
 
 LD_NAME : 'lb' | 'lbu' | 'ld' | 'lh' | 'lhu' | 'lw' | 'lwu' | ('lr.w' | 'lr.d')MO_FLAG?;

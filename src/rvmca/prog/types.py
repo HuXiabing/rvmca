@@ -54,9 +54,3 @@ class EType(Enum):
     Write = 2
     ReadWrite = 3
     SC_Fail = 4
-
-
-class QType(Enum):
-    """Quantifier Type"""
-    Forall = 1
-    Exists = 2

@@ -44,18 +44,11 @@ class SymbolicExecutor:
 
     def __init__(self):
         self.solver = Solver()
-
-        self.events = []
-        self.relations = {}
-        self.path = []
         self.mem_ssa_idx = 0
 
     def reset(self):
         """Reset the simulator."""
         self.solver = Solver()
-        self.events = []
-        self.relations = {}
-        self.path = []
         self.mem_ssa_idx = 0
 
     def verify(self) -> bool:
@@ -70,13 +63,7 @@ class SymbolicExecutor:
         if not path:
             return
 
-        new_events = []
-
-        REG_SIZE = config.get_var('reg_size')
-
-        def add_rel(key: str, pair):
-            self.relations.setdefault(key, [])
-            self.relations[key].append(pair)
+        REG_SIZE = 64
 
         for ssa in path:
             inst = ssa.inst
@@ -92,8 +79,6 @@ class SymbolicExecutor:
                         case 'xor':
                             self.solver.add(rd == rs1 ^ rs2)
                         case 'subw' | 'sub':
-                            # TODO: sub: x[8+rd’] = x[8+rd’] - x[8+rs2’] while subw: x[8+rd’] = sext((x[8+rd’] - x[8+rs2’])[31:0])
-                            # deal with subw [31:0] if possible
                             self.solver.add(rd == rs1 - rs2)
                         case 'or':
                             self.solver.add(rd == rs1 | rs2)
@@ -117,14 +102,11 @@ class SymbolicExecutor:
                     rd, rs1, imm = ssa.operands
                     if is_x0(rd):
                         continue
-
                     # rd == mem_idx
                     value = BitVec(f'mem_{self.mem_ssa_idx}', REG_SIZE)
                     self.solver.add(rd == value)
                     self.mem_ssa_idx += 1
                     addr = rs1 + imm
-
-                    # generate a READ event.
                 case n if n.startswith('lr.'):
                     rd, imm, rs1 = ssa.operands
                     # rd == mem_idx
@@ -190,17 +172,11 @@ class SymbolicExecutor:
                     pass
                 case 'jal':
                     pass
-                case 'mem':
-                    pass
+                case 'lui':
+                    rd, imm = ssa.operands
+
                 case _:
                     raise NotImplementedError(f'{name}')
-
-        # set pid for all events
-        for e in new_events:
-            e.pid = pid
-
-        self.path.extend(path)
-        self.events.extend(new_events)
 
     @staticmethod
     def simplify_expr(value):

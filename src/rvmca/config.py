@@ -22,13 +22,13 @@
 
 """Global Variable Dictionary"""
 import os
-
-from rvmca.utils import dir_util
-import platform
+from pathlib import Path
 
 REG_SIZE = 64
 
 READS_PERMUTATION_REDUCTION = True
+
+
 def init():
     """Initialize the global variable dictionary."""
     global _global_dict
@@ -89,18 +89,15 @@ def has(key: str):
     return key in _global_dict.keys()
 
 
-CUR_DIR = dir_util.get_cur_dir(__file__)
+_current_path = Path(os.path.abspath(__file__)).resolve()
 
 # constant: tool dir/paths
-TOOL_DIR = os.path.join(CUR_DIR, "../../tools")
-GLIBC_VERSION = platform.platform()[-9:]
-# HERD7_PATH = shutil.which("herd7")
-# assert HERD7_PATH is not None
-# HERD7_PATH = os.path.join("/home/xuezheng/.local/opt/herdtools7/bin//", "herd7")
-HERD7_PATH = os.path.join(TOOL_DIR, 'herdtools', GLIBC_VERSION, 'herd7')
+PROJECT_PATH = _current_path.parent.parent.parent
+TOOLS_PATH = PROJECT_PATH / "tools"
+TESTS_PATH = PROJECT_PATH / "tests"
 
-#
-OUTPUT_DIR = os.path.join(CUR_DIR, "../../output")
-dir_util.mk_dir_from_dir_path(OUTPUT_DIR)
+OUTPUT_PATH = TESTS_PATH / 'output'
+INPUT_PATH = TESTS_PATH / 'input'
 
-TEST_DIR = os.path.join(CUR_DIR, "../../tests")
+RISCV_TOOLCHAIN = 'riscv64-unknown-linux-gnu-'
+RISCV_GCC = RISCV_TOOLCHAIN + 'gcc'

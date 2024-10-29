@@ -20,17 +20,26 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """Test for RISC-V Program Parser"""
-from rvmca.analysis import CFG, path_to_ssa, cfg_to_ssa
+from rvmca.trans.block import *
 from rvmca.prog import *
 from rvmca.utils.file_util import *
 from rvmca.config import *
+
+available_regs = [
+    # TODO: check the available registers
+    find_reg_by_name(n)
+    for n in [
+        'x0',
+        # 't0', 't1', 't2', 't3', 't4', 't5', 't6',
+        'a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+]
 
 
 class TestProg:
     def test1(self):
         text = 'li x1, 5' \
-                'addi x2, x1, 1' \
-                'add x2, x2, x2'
+               'addi x2, x1, 1' \
+               'add x2, x2, x2'
         program = parse_program(text)
         print(program.insts)
 
@@ -57,8 +66,44 @@ class TestProg:
             print(f'{i} -> {i2s[i]}')
 
     def test_400_perlbench(self):
-        directory = os.path.join(TEST_DIR, 'input/spec06/400_perlbench')
+        directory = INPUT_PATH / 'spec06' / '400_perlbench'
         for file in list_files(directory, '.S'):
-            content = read_file(file)+'\n'
-            program = parse_program(content)
-            print(program)
+            content = read_file(file) + '\n'
+            prog = parse_program(content)
+            print('\nOriginal program:')
+            print(prog)
+            prog = remap_regs_for_block(prog, available_regs)
+            print('\nRemap registers:')
+            print(prog)
+
+            print('\nInit code:')
+            inits = init_regs_for_block(prog)
+            print('\n')
+            for inst in inits:
+                print(inst)
+
+            print('\nZero immediate:')
+            prog = zero_imm_for_block(prog)
+            print(prog)
+
+    def test_compile(self):
+        directory = INPUT_PATH / 'spec06' / '400_perlbench'
+        for file in list_files(directory, '.S'):
+            content = read_file(file) + '\n'
+            prog = parse_program(content)
+            prog = remap_regs_for_block(prog, available_regs)
+            inits = init_regs_for_block(prog)
+            prog = zero_imm_for_block(prog)
+
+            from rvmca.trans.compile import compile_block
+
+            compile_block(prog, 'test1')
+
+    def test_init_addr_reg(self):
+        filename = INPUT_PATH / 'spec06' / '400_perlbench' / '1.S'
+        content = read_file(filename) + '\n'
+        prog = parse_program(content)
+        prog = remap_regs_for_block(prog, available_regs)
+        # prog = zero_imm_for_block(prog)
+        init_code = init_regs_for_block(prog)
+        print(init_code)

@@ -107,6 +107,15 @@ class ProgramListener(ParseTreeListener):
         pass
 
 
+    # Enter a parse tree produced by ProgramParser#inst_bz.
+    def enterInst_bz(self, ctx:ProgramParser.Inst_bzContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_bz.
+    def exitInst_bz(self, ctx:ProgramParser.Inst_bzContext):
+        pass
+
+
     # Enter a parse tree produced by ProgramParser#inst_j.
     def enterInst_j(self, ctx:ProgramParser.Inst_jContext):
         pass
@@ -125,12 +134,30 @@ class ProgramListener(ParseTreeListener):
         pass
 
 
+    # Enter a parse tree produced by ProgramParser#inst_mv.
+    def enterInst_mv(self, ctx:ProgramParser.Inst_mvContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_mv.
+    def exitInst_mv(self, ctx:ProgramParser.Inst_mvContext):
+        pass
+
+
     # Enter a parse tree produced by ProgramParser#inst_nop.
     def enterInst_nop(self, ctx:ProgramParser.Inst_nopContext):
         pass
 
     # Exit a parse tree produced by ProgramParser#inst_nop.
     def exitInst_nop(self, ctx:ProgramParser.Inst_nopContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_ret.
+    def enterInst_ret(self, ctx:ProgramParser.Inst_retContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_ret.
+    def exitInst_ret(self, ctx:ProgramParser.Inst_retContext):
         pass
 
 
@@ -167,15 +194,6 @@ class ProgramListener(ParseTreeListener):
 
     # Exit a parse tree produced by ProgramParser#inst_fencei.
     def exitInst_fencei(self, ctx:ProgramParser.Inst_fenceiContext):
-        pass
-
-
-    # Enter a parse tree produced by ProgramParser#inst_mem_access.
-    def enterInst_mem_access(self, ctx:ProgramParser.Inst_mem_accessContext):
-        pass
-
-    # Exit a parse tree produced by ProgramParser#inst_mem_access.
-    def exitInst_mem_access(self, ctx:ProgramParser.Inst_mem_accessContext):
         pass
 
 

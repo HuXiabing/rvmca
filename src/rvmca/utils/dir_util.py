@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2023 DehengYang (dehengyang@qq.com)
+# Copyright (c) 2024 DehengYang (dehengyang@qq.com)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -93,7 +93,10 @@ def get_folder_size(folder_path, unit='mb', enable_logging=True):
 
 def mk_dir_from_file_path(file_path):
     # assert os.path.isfile(file_path), f"{file_path} is not a file"
-    dir_path = file_path.rsplit(os.sep, 1)[0]
+    if isinstance(file_path, Path):
+        dir_path = file_path.parent
+    else:
+        dir_path = file_path.rsplit(os.sep, 1)[0]
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 

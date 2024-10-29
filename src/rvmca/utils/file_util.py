@@ -1,7 +1,7 @@
 # MIT License
 #
-# Copyright (c) 2023 DehengYang (dehengyang@qq.com)
-#                    Xuezheng (xuezhengxu@126.com)
+# Copyright (c) 2023-2024 DehengYang (dehengyang@qq.com)
+#                         Xuezheng (xuezhengxu@126.com)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -164,7 +164,7 @@ def rm_all_content_in_dir(dir_path):
     INFO(f"remove all content in {dir_path}")
 
     # to avoid delete important dir
-    if len(dir_path) < MIN_DIR_LEN:
+    if len(str(dir_path)) < MIN_DIR_LEN:
         assert False, "dangerous rm."
 
     for file_name in os.listdir(dir_path):

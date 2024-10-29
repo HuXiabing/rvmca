@@ -50,6 +50,10 @@ class Program:
             insts_repr[label_id] = attach_label(label, insts_repr[label_id])
         return '\n'.join(insts_repr)
 
+    @property
+    def code(self):
+        return '\n'.join([i.code for i in self.insts])
+
 
 class ProgramParseListener(ProgramListener):
     def __init__(self):
@@ -78,7 +82,7 @@ class ProgramParseListener(ProgramListener):
         rd, rs1, rs2 = (ctx.REG(i).getText() for i in range(3))
         if ctx.R_FMT_NAME():
             inst = RFmtInst(ctx.R_FMT_NAME().getText(), rd, rs1, rs2)
-        else: # is an or inst
+        else:  # is an or inst
             inst = RFmtInst('or', rd, rs1, rs2)
         self.program.insts.append(inst)
 
@@ -138,6 +142,19 @@ class ProgramParseListener(ProgramListener):
             inst.label = label.getText()
         self.program.insts.append(inst)
 
+    def enterInst_bz(self, ctx: ProgramParser.Inst_bzContext):
+        rs1, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
+        inst = BFmtInst(ctx.BRANCH_PSEUDO_NAME().getText(), rs1, 'x0')
+        if imm is not None:
+            inst.imm = int(imm.getText())
+        elif label is not None:
+            inst.label = label.getText()
+        self.program.insts.append(inst)
+
+    def enterInst_mv(self, ctx: ProgramParser.Inst_mvContext):
+        inst = IFmtInst('addi', ctx.REG(0).getText(), ctx.REG(1).getText(), 0)
+        self.program.insts.append(inst)
+
     def enterJfmt(self, ctx: ProgramParser.JfmtContext):
         rd, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
         inst = JFmtInst('jal', rd)
@@ -145,6 +162,10 @@ class ProgramParseListener(ProgramListener):
             inst.imm = int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
+        self.program.insts.append(inst)
+
+    def enterInst_ret(self, ctx: ProgramParser.Inst_retContext):
+        inst = JalrInst('jalr', 'x0', 'ra', 0)
         self.program.insts.append(inst)
 
     def enterLabel(self, ctx: ProgramParser.LabelContext):

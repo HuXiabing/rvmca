@@ -10,60 +10,66 @@ else:
 
 def serializedATN():
     return [
-        4,1,35,168,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
+        4,1,37,183,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
         6,2,7,7,7,2,8,7,8,2,9,7,9,2,10,7,10,2,11,7,11,2,12,7,12,2,13,7,13,
         2,14,7,14,2,15,7,15,2,16,7,16,2,17,7,17,2,18,7,18,2,19,7,19,2,20,
-        7,20,1,0,1,0,4,0,45,8,0,11,0,12,0,46,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
-        1,1,1,1,1,1,1,1,1,1,3,1,61,8,1,1,1,3,1,64,8,1,1,2,1,2,1,2,3,2,69,
-        8,2,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,3,3,83,8,3,1,
-        4,1,4,1,4,1,4,1,4,1,4,1,4,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,6,1,
-        6,1,6,1,6,1,6,1,6,1,6,1,7,1,7,1,7,1,7,1,7,1,8,1,8,1,8,1,8,1,8,1,
-        9,1,9,3,9,119,8,9,1,9,1,9,1,9,1,9,1,9,3,9,126,8,9,1,9,1,9,1,9,1,
-        9,1,10,1,10,1,10,3,10,135,8,10,1,11,1,11,1,11,1,12,1,12,1,12,1,13,
-        1,13,1,14,1,14,1,14,1,14,1,14,1,14,3,14,151,8,14,1,15,1,15,1,16,
-        1,16,1,17,1,17,1,18,1,18,1,18,1,19,1,19,3,19,164,8,19,1,20,1,20,
-        1,20,0,0,21,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,
-        38,40,0,3,2,0,19,19,24,25,1,0,29,30,1,0,15,17,168,0,44,1,0,0,0,2,
-        60,1,0,0,0,4,65,1,0,0,0,6,82,1,0,0,0,8,84,1,0,0,0,10,91,1,0,0,0,
-        12,99,1,0,0,0,14,106,1,0,0,0,16,111,1,0,0,0,18,116,1,0,0,0,20,134,
-        1,0,0,0,22,136,1,0,0,0,24,139,1,0,0,0,26,142,1,0,0,0,28,150,1,0,
-        0,0,30,152,1,0,0,0,32,154,1,0,0,0,34,156,1,0,0,0,36,158,1,0,0,0,
-        38,163,1,0,0,0,40,165,1,0,0,0,42,45,3,4,2,0,43,45,3,2,1,0,44,42,
-        1,0,0,0,44,43,1,0,0,0,45,46,1,0,0,0,46,44,1,0,0,0,46,47,1,0,0,0,
-        47,1,1,0,0,0,48,61,3,6,3,0,49,61,3,8,4,0,50,61,3,10,5,0,51,61,3,
-        12,6,0,52,61,3,14,7,0,53,61,3,16,8,0,54,61,3,18,9,0,55,61,3,20,10,
-        0,56,61,3,28,14,0,57,61,3,30,15,0,58,61,3,34,17,0,59,61,3,36,18,
-        0,60,48,1,0,0,0,60,49,1,0,0,0,60,50,1,0,0,0,60,51,1,0,0,0,60,52,
-        1,0,0,0,60,53,1,0,0,0,60,54,1,0,0,0,60,55,1,0,0,0,60,56,1,0,0,0,
-        60,57,1,0,0,0,60,58,1,0,0,0,60,59,1,0,0,0,61,63,1,0,0,0,62,64,5,
-        1,0,0,63,62,1,0,0,0,63,64,1,0,0,0,64,3,1,0,0,0,65,66,5,29,0,0,66,
-        68,5,2,0,0,67,69,5,1,0,0,68,67,1,0,0,0,68,69,1,0,0,0,69,5,1,0,0,
-        0,70,71,5,20,0,0,71,72,5,28,0,0,72,73,5,3,0,0,73,74,5,28,0,0,74,
-        75,5,3,0,0,75,83,5,28,0,0,76,77,5,4,0,0,77,78,5,28,0,0,78,79,5,3,
-        0,0,79,80,5,28,0,0,80,81,5,3,0,0,81,83,5,28,0,0,82,70,1,0,0,0,82,
-        76,1,0,0,0,83,7,1,0,0,0,84,85,5,21,0,0,85,86,5,28,0,0,86,87,5,3,
-        0,0,87,88,5,28,0,0,88,89,5,3,0,0,89,90,5,30,0,0,90,9,1,0,0,0,91,
-        92,7,0,0,0,92,93,5,28,0,0,93,94,5,3,0,0,94,95,5,30,0,0,95,96,5,5,
-        0,0,96,97,5,28,0,0,97,98,5,6,0,0,98,11,1,0,0,0,99,100,5,22,0,0,100,
-        101,5,28,0,0,101,102,5,3,0,0,102,103,5,28,0,0,103,104,5,3,0,0,104,
-        105,7,1,0,0,105,13,1,0,0,0,106,107,5,7,0,0,107,108,5,28,0,0,108,
-        109,5,3,0,0,109,110,7,1,0,0,110,15,1,0,0,0,111,112,5,23,0,0,112,
-        113,5,28,0,0,113,114,5,3,0,0,114,115,5,30,0,0,115,17,1,0,0,0,116,
-        118,5,26,0,0,117,119,5,27,0,0,118,117,1,0,0,0,118,119,1,0,0,0,119,
-        120,1,0,0,0,120,121,5,28,0,0,121,122,5,3,0,0,122,123,5,28,0,0,123,
-        125,5,3,0,0,124,126,5,30,0,0,125,124,1,0,0,0,125,126,1,0,0,0,126,
-        127,1,0,0,0,127,128,5,5,0,0,128,129,5,28,0,0,129,130,5,6,0,0,130,
-        19,1,0,0,0,131,135,3,22,11,0,132,135,3,24,12,0,133,135,3,26,13,0,
-        134,131,1,0,0,0,134,132,1,0,0,0,134,133,1,0,0,0,135,21,1,0,0,0,136,
-        137,5,8,0,0,137,138,7,1,0,0,138,23,1,0,0,0,139,140,5,9,0,0,140,141,
-        5,28,0,0,141,25,1,0,0,0,142,143,5,10,0,0,143,27,1,0,0,0,144,145,
-        5,11,0,0,145,146,3,38,19,0,146,147,5,3,0,0,147,148,3,38,19,0,148,
-        151,1,0,0,0,149,151,3,32,16,0,150,144,1,0,0,0,150,149,1,0,0,0,151,
-        29,1,0,0,0,152,153,5,12,0,0,153,31,1,0,0,0,154,155,5,11,0,0,155,
-        33,1,0,0,0,156,157,5,13,0,0,157,35,1,0,0,0,158,159,5,14,0,0,159,
-        160,3,38,19,0,160,37,1,0,0,0,161,164,5,18,0,0,162,164,3,40,20,0,
-        163,161,1,0,0,0,163,162,1,0,0,0,164,39,1,0,0,0,165,166,7,2,0,0,166,
-        41,1,0,0,0,11,44,46,60,63,68,82,118,125,134,150,163
+        7,20,2,21,7,21,2,22,7,22,1,0,1,0,4,0,49,8,0,11,0,12,0,50,1,1,1,1,
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,64,8,1,1,1,3,1,67,8,1,1,
+        2,1,2,1,2,3,2,72,8,2,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,1,3,
+        1,3,3,3,86,8,3,1,4,1,4,1,4,1,4,1,4,1,4,1,4,1,5,1,5,1,5,1,5,1,5,1,
+        5,1,5,1,5,1,6,1,6,1,6,1,6,1,6,1,6,1,6,1,7,1,7,1,7,1,7,1,7,1,8,1,
+        8,1,8,1,8,1,8,1,9,1,9,3,9,122,8,9,1,9,1,9,1,9,1,9,1,9,3,9,129,8,
+        9,1,9,1,9,1,9,1,9,1,10,1,10,1,10,1,10,1,10,1,10,3,10,141,8,10,1,
+        11,1,11,1,11,1,11,1,11,1,12,1,12,1,12,1,13,1,13,1,13,1,14,1,14,1,
+        14,1,14,1,14,1,15,1,15,1,16,1,16,1,17,1,17,1,17,1,17,1,17,1,17,3,
+        17,169,8,17,1,18,1,18,1,19,1,19,1,20,1,20,1,21,1,21,3,21,179,8,21,
+        1,22,1,22,1,22,0,0,23,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,
+        32,34,36,38,40,42,44,0,4,2,0,21,21,26,27,2,0,20,20,24,24,1,0,31,
+        32,1,0,16,18,183,0,48,1,0,0,0,2,63,1,0,0,0,4,68,1,0,0,0,6,85,1,0,
+        0,0,8,87,1,0,0,0,10,94,1,0,0,0,12,102,1,0,0,0,14,109,1,0,0,0,16,
+        114,1,0,0,0,18,119,1,0,0,0,20,140,1,0,0,0,22,142,1,0,0,0,24,147,
+        1,0,0,0,26,150,1,0,0,0,28,153,1,0,0,0,30,158,1,0,0,0,32,160,1,0,
+        0,0,34,168,1,0,0,0,36,170,1,0,0,0,38,172,1,0,0,0,40,174,1,0,0,0,
+        42,178,1,0,0,0,44,180,1,0,0,0,46,49,3,4,2,0,47,49,3,2,1,0,48,46,
+        1,0,0,0,48,47,1,0,0,0,49,50,1,0,0,0,50,48,1,0,0,0,50,51,1,0,0,0,
+        51,1,1,0,0,0,52,64,3,6,3,0,53,64,3,8,4,0,54,64,3,10,5,0,55,64,3,
+        12,6,0,56,64,3,14,7,0,57,64,3,16,8,0,58,64,3,18,9,0,59,64,3,20,10,
+        0,60,64,3,34,17,0,61,64,3,36,18,0,62,64,3,40,20,0,63,52,1,0,0,0,
+        63,53,1,0,0,0,63,54,1,0,0,0,63,55,1,0,0,0,63,56,1,0,0,0,63,57,1,
+        0,0,0,63,58,1,0,0,0,63,59,1,0,0,0,63,60,1,0,0,0,63,61,1,0,0,0,63,
+        62,1,0,0,0,64,66,1,0,0,0,65,67,5,1,0,0,66,65,1,0,0,0,66,67,1,0,0,
+        0,67,3,1,0,0,0,68,69,5,31,0,0,69,71,5,2,0,0,70,72,5,1,0,0,71,70,
+        1,0,0,0,71,72,1,0,0,0,72,5,1,0,0,0,73,74,5,22,0,0,74,75,5,30,0,0,
+        75,76,5,3,0,0,76,77,5,30,0,0,77,78,5,3,0,0,78,86,5,30,0,0,79,80,
+        5,4,0,0,80,81,5,30,0,0,81,82,5,3,0,0,82,83,5,30,0,0,83,84,5,3,0,
+        0,84,86,5,30,0,0,85,73,1,0,0,0,85,79,1,0,0,0,86,7,1,0,0,0,87,88,
+        5,23,0,0,88,89,5,30,0,0,89,90,5,3,0,0,90,91,5,30,0,0,91,92,5,3,0,
+        0,92,93,5,32,0,0,93,9,1,0,0,0,94,95,7,0,0,0,95,96,5,30,0,0,96,97,
+        5,3,0,0,97,98,5,32,0,0,98,99,5,5,0,0,99,100,5,30,0,0,100,101,5,6,
+        0,0,101,11,1,0,0,0,102,103,7,1,0,0,103,104,5,30,0,0,104,105,5,3,
+        0,0,105,106,5,30,0,0,106,107,5,3,0,0,107,108,7,2,0,0,108,13,1,0,
+        0,0,109,110,5,7,0,0,110,111,5,30,0,0,111,112,5,3,0,0,112,113,7,2,
+        0,0,113,15,1,0,0,0,114,115,5,25,0,0,115,116,5,30,0,0,116,117,5,3,
+        0,0,117,118,5,32,0,0,118,17,1,0,0,0,119,121,5,28,0,0,120,122,5,29,
+        0,0,121,120,1,0,0,0,121,122,1,0,0,0,122,123,1,0,0,0,123,124,5,30,
+        0,0,124,125,5,3,0,0,125,126,5,30,0,0,126,128,5,3,0,0,127,129,5,32,
+        0,0,128,127,1,0,0,0,128,129,1,0,0,0,129,130,1,0,0,0,130,131,5,5,
+        0,0,131,132,5,30,0,0,132,133,5,6,0,0,133,19,1,0,0,0,134,141,3,24,
+        12,0,135,141,3,26,13,0,136,141,3,30,15,0,137,141,3,22,11,0,138,141,
+        3,28,14,0,139,141,3,32,16,0,140,134,1,0,0,0,140,135,1,0,0,0,140,
+        136,1,0,0,0,140,137,1,0,0,0,140,138,1,0,0,0,140,139,1,0,0,0,141,
+        21,1,0,0,0,142,143,5,20,0,0,143,144,5,30,0,0,144,145,5,3,0,0,145,
+        146,7,2,0,0,146,23,1,0,0,0,147,148,5,8,0,0,148,149,7,2,0,0,149,25,
+        1,0,0,0,150,151,5,9,0,0,151,152,5,30,0,0,152,27,1,0,0,0,153,154,
+        5,10,0,0,154,155,5,30,0,0,155,156,5,3,0,0,156,157,5,30,0,0,157,29,
+        1,0,0,0,158,159,5,11,0,0,159,31,1,0,0,0,160,161,5,12,0,0,161,33,
+        1,0,0,0,162,163,5,13,0,0,163,164,3,42,21,0,164,165,5,3,0,0,165,166,
+        3,42,21,0,166,169,1,0,0,0,167,169,3,38,19,0,168,162,1,0,0,0,168,
+        167,1,0,0,0,169,35,1,0,0,0,170,171,5,14,0,0,171,37,1,0,0,0,172,173,
+        5,13,0,0,173,39,1,0,0,0,174,175,5,15,0,0,175,41,1,0,0,0,176,179,
+        5,19,0,0,177,179,3,44,22,0,178,176,1,0,0,0,178,177,1,0,0,0,179,43,
+        1,0,0,0,180,181,7,3,0,0,181,45,1,0,0,0,11,48,50,63,66,71,85,121,
+        128,140,168,178
     ]
 
 class ProgramParser ( Parser ):
@@ -77,19 +83,19 @@ class ProgramParser ( Parser ):
     sharedContextCache = PredictionContextCache()
 
     literalNames = [ "<INVALID>", "';'", "':'", "','", "'or'", "'('", "')'", 
-                     "'jal'", "'j'", "'jr'", "'nop'", "'fence'", "'fence.tso'", 
-                     "'fence.i'", "'mem'", "'r'", "'w'", "'rw'", "<INVALID>", 
-                     "'jalr'" ]
+                     "'jal'", "'j'", "'jr'", "'mv'", "'nop'", "'ret'", "'fence'", 
+                     "'fence.tso'", "'fence.i'", "'r'", "'w'", "'rw'", "<INVALID>", 
+                     "<INVALID>", "'jalr'" ]
 
     symbolicNames = [ "<INVALID>", "<INVALID>", "<INVALID>", "<INVALID>", 
                       "<INVALID>", "<INVALID>", "<INVALID>", "<INVALID>", 
                       "<INVALID>", "<INVALID>", "<INVALID>", "<INVALID>", 
                       "<INVALID>", "<INVALID>", "<INVALID>", "<INVALID>", 
-                      "<INVALID>", "<INVALID>", "FENCE_OP", "JALR", "R_FMT_NAME", 
-                      "I_FMT_NAME", "B_FMT_NAME", "U_FMT_NAME", "LD_NAME", 
-                      "SD_NAME", "AMO_NAME", "MO_FLAG", "REG", "LABEL", 
-                      "IMM", "LINE_COMMENT", "LINE_COMMENT2", "COMMENT", 
-                      "OTHER_COMMENT", "WS" ]
+                      "<INVALID>", "<INVALID>", "<INVALID>", "FENCE_OP", 
+                      "BRANCH_PSEUDO_NAME", "JALR", "R_FMT_NAME", "I_FMT_NAME", 
+                      "B_FMT_NAME", "U_FMT_NAME", "LD_NAME", "SD_NAME", 
+                      "AMO_NAME", "MO_FLAG", "REG", "LABEL", "IMM", "LINE_COMMENT", 
+                      "LINE_COMMENT2", "COMMENT", "OTHER_COMMENT", "WS" ]
 
     RULE_prog = 0
     RULE_inst = 1
@@ -102,21 +108,24 @@ class ProgramParser ( Parser ):
     RULE_ufmt = 8
     RULE_amofmt = 9
     RULE_pseudo = 10
-    RULE_inst_j = 11
-    RULE_inst_jr = 12
-    RULE_inst_nop = 13
-    RULE_inst_fence = 14
-    RULE_inst_fencetso = 15
-    RULE_fence_single = 16
-    RULE_inst_fencei = 17
-    RULE_inst_mem_access = 18
-    RULE_mem_access_op = 19
-    RULE_mem_access_op_single = 20
+    RULE_inst_bz = 11
+    RULE_inst_j = 12
+    RULE_inst_jr = 13
+    RULE_inst_mv = 14
+    RULE_inst_nop = 15
+    RULE_inst_ret = 16
+    RULE_inst_fence = 17
+    RULE_inst_fencetso = 18
+    RULE_fence_single = 19
+    RULE_inst_fencei = 20
+    RULE_mem_access_op = 21
+    RULE_mem_access_op_single = 22
 
     ruleNames =  [ "prog", "inst", "label", "rfmt", "ifmt", "mfmt", "bfmt", 
-                   "jfmt", "ufmt", "amofmt", "pseudo", "inst_j", "inst_jr", 
-                   "inst_nop", "inst_fence", "inst_fencetso", "fence_single", 
-                   "inst_fencei", "inst_mem_access", "mem_access_op", "mem_access_op_single" ]
+                   "jfmt", "ufmt", "amofmt", "pseudo", "inst_bz", "inst_j", 
+                   "inst_jr", "inst_mv", "inst_nop", "inst_ret", "inst_fence", 
+                   "inst_fencetso", "fence_single", "inst_fencei", "mem_access_op", 
+                   "mem_access_op_single" ]
 
     EOF = Token.EOF
     T__0=1
@@ -136,24 +145,26 @@ class ProgramParser ( Parser ):
     T__14=15
     T__15=16
     T__16=17
-    FENCE_OP=18
-    JALR=19
-    R_FMT_NAME=20
-    I_FMT_NAME=21
-    B_FMT_NAME=22
-    U_FMT_NAME=23
-    LD_NAME=24
-    SD_NAME=25
-    AMO_NAME=26
-    MO_FLAG=27
-    REG=28
-    LABEL=29
-    IMM=30
-    LINE_COMMENT=31
-    LINE_COMMENT2=32
-    COMMENT=33
-    OTHER_COMMENT=34
-    WS=35
+    T__17=18
+    FENCE_OP=19
+    BRANCH_PSEUDO_NAME=20
+    JALR=21
+    R_FMT_NAME=22
+    I_FMT_NAME=23
+    B_FMT_NAME=24
+    U_FMT_NAME=25
+    LD_NAME=26
+    SD_NAME=27
+    AMO_NAME=28
+    MO_FLAG=29
+    REG=30
+    LABEL=31
+    IMM=32
+    LINE_COMMENT=33
+    LINE_COMMENT2=34
+    COMMENT=35
+    OTHER_COMMENT=36
+    WS=37
 
     def __init__(self, input:TokenStream, output:TextIO = sys.stdout):
         super().__init__(input, output)
@@ -206,28 +217,28 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 44 
+            self.state = 48 
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             while True:
-                self.state = 44
+                self.state = 48
                 self._errHandler.sync(self)
                 token = self._input.LA(1)
-                if token in [29]:
-                    self.state = 42
+                if token in [31]:
+                    self.state = 46
                     self.label()
                     pass
-                elif token in [4, 7, 8, 9, 10, 11, 12, 13, 14, 19, 20, 21, 22, 23, 24, 25, 26]:
-                    self.state = 43
+                elif token in [4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25, 26, 27, 28]:
+                    self.state = 47
                     self.inst()
                     pass
                 else:
                     raise NoViableAltException(self)
 
-                self.state = 46 
+                self.state = 50 
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 670597008) != 0)):
+                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 2683371408) != 0)):
                     break
 
         except RecognitionException as re:
@@ -290,10 +301,6 @@ class ProgramParser ( Parser ):
             return self.getTypedRuleContext(ProgramParser.Inst_fenceiContext,0)
 
 
-        def inst_mem_access(self):
-            return self.getTypedRuleContext(ProgramParser.Inst_mem_accessContext,0)
-
-
         def getRuleIndex(self):
             return ProgramParser.RULE_inst
 
@@ -315,65 +322,70 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 60
+            self.state = 63
             self._errHandler.sync(self)
-            token = self._input.LA(1)
-            if token in [4, 20]:
-                self.state = 48
+            la_ = self._interp.adaptivePredict(self._input,2,self._ctx)
+            if la_ == 1:
+                self.state = 52
                 self.rfmt()
                 pass
-            elif token in [21]:
-                self.state = 49
+
+            elif la_ == 2:
+                self.state = 53
                 self.ifmt()
                 pass
-            elif token in [19, 24, 25]:
-                self.state = 50
+
+            elif la_ == 3:
+                self.state = 54
                 self.mfmt()
                 pass
-            elif token in [22]:
-                self.state = 51
+
+            elif la_ == 4:
+                self.state = 55
                 self.bfmt()
                 pass
-            elif token in [7]:
-                self.state = 52
+
+            elif la_ == 5:
+                self.state = 56
                 self.jfmt()
                 pass
-            elif token in [23]:
-                self.state = 53
+
+            elif la_ == 6:
+                self.state = 57
                 self.ufmt()
                 pass
-            elif token in [26]:
-                self.state = 54
+
+            elif la_ == 7:
+                self.state = 58
                 self.amofmt()
                 pass
-            elif token in [8, 9, 10]:
-                self.state = 55
+
+            elif la_ == 8:
+                self.state = 59
                 self.pseudo()
                 pass
-            elif token in [11]:
-                self.state = 56
+
+            elif la_ == 9:
+                self.state = 60
                 self.inst_fence()
                 pass
-            elif token in [12]:
-                self.state = 57
+
+            elif la_ == 10:
+                self.state = 61
                 self.inst_fencetso()
                 pass
-            elif token in [13]:
-                self.state = 58
+
+            elif la_ == 11:
+                self.state = 62
                 self.inst_fencei()
                 pass
-            elif token in [14]:
-                self.state = 59
-                self.inst_mem_access()
-                pass
-            else:
-                raise NoViableAltException(self)
 
-            self.state = 63
+
+            self.state = 66
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             if _la==1:
-                self.state = 62
+                self.state = 65
                 self.match(ProgramParser.T__0)
 
 
@@ -417,15 +429,15 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 65
-            self.match(ProgramParser.LABEL)
-            self.state = 66
-            self.match(ProgramParser.T__1)
             self.state = 68
+            self.match(ProgramParser.LABEL)
+            self.state = 69
+            self.match(ProgramParser.T__1)
+            self.state = 71
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             if _la==1:
-                self.state = 67
+                self.state = 70
                 self.match(ProgramParser.T__0)
 
 
@@ -473,37 +485,37 @@ class ProgramParser ( Parser ):
         localctx = ProgramParser.RfmtContext(self, self._ctx, self.state)
         self.enterRule(localctx, 6, self.RULE_rfmt)
         try:
-            self.state = 82
+            self.state = 85
             self._errHandler.sync(self)
             token = self._input.LA(1)
-            if token in [20]:
+            if token in [22]:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 70
-                self.match(ProgramParser.R_FMT_NAME)
-                self.state = 71
-                self.match(ProgramParser.REG)
-                self.state = 72
-                self.match(ProgramParser.T__2)
                 self.state = 73
-                self.match(ProgramParser.REG)
+                self.match(ProgramParser.R_FMT_NAME)
                 self.state = 74
-                self.match(ProgramParser.T__2)
+                self.match(ProgramParser.REG)
                 self.state = 75
+                self.match(ProgramParser.T__2)
+                self.state = 76
+                self.match(ProgramParser.REG)
+                self.state = 77
+                self.match(ProgramParser.T__2)
+                self.state = 78
                 self.match(ProgramParser.REG)
                 pass
             elif token in [4]:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 76
-                self.match(ProgramParser.T__3)
-                self.state = 77
-                self.match(ProgramParser.REG)
-                self.state = 78
-                self.match(ProgramParser.T__2)
                 self.state = 79
-                self.match(ProgramParser.REG)
+                self.match(ProgramParser.T__3)
                 self.state = 80
-                self.match(ProgramParser.T__2)
+                self.match(ProgramParser.REG)
                 self.state = 81
+                self.match(ProgramParser.T__2)
+                self.state = 82
+                self.match(ProgramParser.REG)
+                self.state = 83
+                self.match(ProgramParser.T__2)
+                self.state = 84
                 self.match(ProgramParser.REG)
                 pass
             else:
@@ -557,17 +569,17 @@ class ProgramParser ( Parser ):
         self.enterRule(localctx, 8, self.RULE_ifmt)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 84
-            self.match(ProgramParser.I_FMT_NAME)
-            self.state = 85
-            self.match(ProgramParser.REG)
-            self.state = 86
-            self.match(ProgramParser.T__2)
             self.state = 87
-            self.match(ProgramParser.REG)
+            self.match(ProgramParser.I_FMT_NAME)
             self.state = 88
-            self.match(ProgramParser.T__2)
+            self.match(ProgramParser.REG)
             self.state = 89
+            self.match(ProgramParser.T__2)
+            self.state = 90
+            self.match(ProgramParser.REG)
+            self.state = 91
+            self.match(ProgramParser.T__2)
+            self.state = 92
             self.match(ProgramParser.IMM)
         except RecognitionException as re:
             localctx.exception = re
@@ -624,24 +636,24 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 91
+            self.state = 94
             _la = self._input.LA(1)
-            if not((((_la) & ~0x3f) == 0 and ((1 << _la) & 50855936) != 0)):
+            if not((((_la) & ~0x3f) == 0 and ((1 << _la) & 203423744) != 0)):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
                 self.consume()
-            self.state = 92
-            self.match(ProgramParser.REG)
-            self.state = 93
-            self.match(ProgramParser.T__2)
-            self.state = 94
-            self.match(ProgramParser.IMM)
             self.state = 95
-            self.match(ProgramParser.T__4)
-            self.state = 96
             self.match(ProgramParser.REG)
+            self.state = 96
+            self.match(ProgramParser.T__2)
             self.state = 97
+            self.match(ProgramParser.IMM)
+            self.state = 98
+            self.match(ProgramParser.T__4)
+            self.state = 99
+            self.match(ProgramParser.REG)
+            self.state = 100
             self.match(ProgramParser.T__5)
         except RecognitionException as re:
             localctx.exception = re
@@ -659,14 +671,17 @@ class ProgramParser ( Parser ):
             super().__init__(parent, invokingState)
             self.parser = parser
 
-        def B_FMT_NAME(self):
-            return self.getToken(ProgramParser.B_FMT_NAME, 0)
-
         def REG(self, i:int=None):
             if i is None:
                 return self.getTokens(ProgramParser.REG)
             else:
                 return self.getToken(ProgramParser.REG, i)
+
+        def B_FMT_NAME(self):
+            return self.getToken(ProgramParser.B_FMT_NAME, 0)
+
+        def BRANCH_PSEUDO_NAME(self):
+            return self.getToken(ProgramParser.BRANCH_PSEUDO_NAME, 0)
 
         def LABEL(self):
             return self.getToken(ProgramParser.LABEL, 0)
@@ -695,19 +710,24 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 99
-            self.match(ProgramParser.B_FMT_NAME)
-            self.state = 100
-            self.match(ProgramParser.REG)
-            self.state = 101
-            self.match(ProgramParser.T__2)
             self.state = 102
-            self.match(ProgramParser.REG)
-            self.state = 103
-            self.match(ProgramParser.T__2)
-            self.state = 104
             _la = self._input.LA(1)
-            if not(_la==29 or _la==30):
+            if not(_la==20 or _la==24):
+                self._errHandler.recoverInline(self)
+            else:
+                self._errHandler.reportMatch(self)
+                self.consume()
+            self.state = 103
+            self.match(ProgramParser.REG)
+            self.state = 104
+            self.match(ProgramParser.T__2)
+            self.state = 105
+            self.match(ProgramParser.REG)
+            self.state = 106
+            self.match(ProgramParser.T__2)
+            self.state = 107
+            _la = self._input.LA(1)
+            if not(_la==31 or _la==32):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
@@ -758,15 +778,15 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 106
-            self.match(ProgramParser.T__6)
-            self.state = 107
-            self.match(ProgramParser.REG)
-            self.state = 108
-            self.match(ProgramParser.T__2)
             self.state = 109
+            self.match(ProgramParser.T__6)
+            self.state = 110
+            self.match(ProgramParser.REG)
+            self.state = 111
+            self.match(ProgramParser.T__2)
+            self.state = 112
             _la = self._input.LA(1)
-            if not(_la==29 or _la==30):
+            if not(_la==31 or _la==32):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
@@ -816,13 +836,13 @@ class ProgramParser ( Parser ):
         self.enterRule(localctx, 16, self.RULE_ufmt)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 111
-            self.match(ProgramParser.U_FMT_NAME)
-            self.state = 112
-            self.match(ProgramParser.REG)
-            self.state = 113
-            self.match(ProgramParser.T__2)
             self.state = 114
+            self.match(ProgramParser.U_FMT_NAME)
+            self.state = 115
+            self.match(ProgramParser.REG)
+            self.state = 116
+            self.match(ProgramParser.T__2)
+            self.state = 117
             self.match(ProgramParser.IMM)
         except RecognitionException as re:
             localctx.exception = re
@@ -876,37 +896,37 @@ class ProgramParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 116
+            self.state = 119
             self.match(ProgramParser.AMO_NAME)
-            self.state = 118
+            self.state = 121
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if _la==27:
-                self.state = 117
+            if _la==29:
+                self.state = 120
                 self.match(ProgramParser.MO_FLAG)
 
 
-            self.state = 120
-            self.match(ProgramParser.REG)
-            self.state = 121
-            self.match(ProgramParser.T__2)
-            self.state = 122
-            self.match(ProgramParser.REG)
             self.state = 123
+            self.match(ProgramParser.REG)
+            self.state = 124
             self.match(ProgramParser.T__2)
             self.state = 125
+            self.match(ProgramParser.REG)
+            self.state = 126
+            self.match(ProgramParser.T__2)
+            self.state = 128
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if _la==30:
-                self.state = 124
+            if _la==32:
+                self.state = 127
                 self.match(ProgramParser.IMM)
 
 
-            self.state = 127
+            self.state = 130
             self.match(ProgramParser.T__4)
-            self.state = 128
+            self.state = 131
             self.match(ProgramParser.REG)
-            self.state = 129
+            self.state = 132
             self.match(ProgramParser.T__5)
         except RecognitionException as re:
             localctx.exception = re
@@ -936,6 +956,18 @@ class ProgramParser ( Parser ):
             return self.getTypedRuleContext(ProgramParser.Inst_nopContext,0)
 
 
+        def inst_bz(self):
+            return self.getTypedRuleContext(ProgramParser.Inst_bzContext,0)
+
+
+        def inst_mv(self):
+            return self.getTypedRuleContext(ProgramParser.Inst_mvContext,0)
+
+
+        def inst_ret(self):
+            return self.getTypedRuleContext(ProgramParser.Inst_retContext,0)
+
+
         def getRuleIndex(self):
             return ProgramParser.RULE_pseudo
 
@@ -955,27 +987,104 @@ class ProgramParser ( Parser ):
         localctx = ProgramParser.PseudoContext(self, self._ctx, self.state)
         self.enterRule(localctx, 20, self.RULE_pseudo)
         try:
-            self.state = 134
+            self.state = 140
             self._errHandler.sync(self)
             token = self._input.LA(1)
             if token in [8]:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 131
+                self.state = 134
                 self.inst_j()
                 pass
             elif token in [9]:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 132
+                self.state = 135
                 self.inst_jr()
                 pass
-            elif token in [10]:
+            elif token in [11]:
                 self.enterOuterAlt(localctx, 3)
-                self.state = 133
+                self.state = 136
                 self.inst_nop()
+                pass
+            elif token in [20]:
+                self.enterOuterAlt(localctx, 4)
+                self.state = 137
+                self.inst_bz()
+                pass
+            elif token in [10]:
+                self.enterOuterAlt(localctx, 5)
+                self.state = 138
+                self.inst_mv()
+                pass
+            elif token in [12]:
+                self.enterOuterAlt(localctx, 6)
+                self.state = 139
+                self.inst_ret()
                 pass
             else:
                 raise NoViableAltException(self)
 
+        except RecognitionException as re:
+            localctx.exception = re
+            self._errHandler.reportError(self, re)
+            self._errHandler.recover(self, re)
+        finally:
+            self.exitRule()
+        return localctx
+
+
+    class Inst_bzContext(ParserRuleContext):
+        __slots__ = 'parser'
+
+        def __init__(self, parser, parent:ParserRuleContext=None, invokingState:int=-1):
+            super().__init__(parent, invokingState)
+            self.parser = parser
+
+        def BRANCH_PSEUDO_NAME(self):
+            return self.getToken(ProgramParser.BRANCH_PSEUDO_NAME, 0)
+
+        def REG(self):
+            return self.getToken(ProgramParser.REG, 0)
+
+        def LABEL(self):
+            return self.getToken(ProgramParser.LABEL, 0)
+
+        def IMM(self):
+            return self.getToken(ProgramParser.IMM, 0)
+
+        def getRuleIndex(self):
+            return ProgramParser.RULE_inst_bz
+
+        def enterRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "enterInst_bz" ):
+                listener.enterInst_bz(self)
+
+        def exitRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "exitInst_bz" ):
+                listener.exitInst_bz(self)
+
+
+
+
+    def inst_bz(self):
+
+        localctx = ProgramParser.Inst_bzContext(self, self._ctx, self.state)
+        self.enterRule(localctx, 22, self.RULE_inst_bz)
+        self._la = 0 # Token type
+        try:
+            self.enterOuterAlt(localctx, 1)
+            self.state = 142
+            self.match(ProgramParser.BRANCH_PSEUDO_NAME)
+            self.state = 143
+            self.match(ProgramParser.REG)
+            self.state = 144
+            self.match(ProgramParser.T__2)
+            self.state = 145
+            _la = self._input.LA(1)
+            if not(_la==31 or _la==32):
+                self._errHandler.recoverInline(self)
+            else:
+                self._errHandler.reportMatch(self)
+                self.consume()
         except RecognitionException as re:
             localctx.exception = re
             self._errHandler.reportError(self, re)
@@ -1015,15 +1124,15 @@ class ProgramParser ( Parser ):
     def inst_j(self):
 
         localctx = ProgramParser.Inst_jContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 22, self.RULE_inst_j)
+        self.enterRule(localctx, 24, self.RULE_inst_j)
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 136
+            self.state = 147
             self.match(ProgramParser.T__7)
-            self.state = 137
+            self.state = 148
             _la = self._input.LA(1)
-            if not(_la==29 or _la==30):
+            if not(_la==31 or _la==32):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
@@ -1064,12 +1173,62 @@ class ProgramParser ( Parser ):
     def inst_jr(self):
 
         localctx = ProgramParser.Inst_jrContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 24, self.RULE_inst_jr)
+        self.enterRule(localctx, 26, self.RULE_inst_jr)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 139
+            self.state = 150
             self.match(ProgramParser.T__8)
-            self.state = 140
+            self.state = 151
+            self.match(ProgramParser.REG)
+        except RecognitionException as re:
+            localctx.exception = re
+            self._errHandler.reportError(self, re)
+            self._errHandler.recover(self, re)
+        finally:
+            self.exitRule()
+        return localctx
+
+
+    class Inst_mvContext(ParserRuleContext):
+        __slots__ = 'parser'
+
+        def __init__(self, parser, parent:ParserRuleContext=None, invokingState:int=-1):
+            super().__init__(parent, invokingState)
+            self.parser = parser
+
+        def REG(self, i:int=None):
+            if i is None:
+                return self.getTokens(ProgramParser.REG)
+            else:
+                return self.getToken(ProgramParser.REG, i)
+
+        def getRuleIndex(self):
+            return ProgramParser.RULE_inst_mv
+
+        def enterRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "enterInst_mv" ):
+                listener.enterInst_mv(self)
+
+        def exitRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "exitInst_mv" ):
+                listener.exitInst_mv(self)
+
+
+
+
+    def inst_mv(self):
+
+        localctx = ProgramParser.Inst_mvContext(self, self._ctx, self.state)
+        self.enterRule(localctx, 28, self.RULE_inst_mv)
+        try:
+            self.enterOuterAlt(localctx, 1)
+            self.state = 153
+            self.match(ProgramParser.T__9)
+            self.state = 154
+            self.match(ProgramParser.REG)
+            self.state = 155
+            self.match(ProgramParser.T__2)
+            self.state = 156
             self.match(ProgramParser.REG)
         except RecognitionException as re:
             localctx.exception = re
@@ -1105,11 +1264,50 @@ class ProgramParser ( Parser ):
     def inst_nop(self):
 
         localctx = ProgramParser.Inst_nopContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 26, self.RULE_inst_nop)
+        self.enterRule(localctx, 30, self.RULE_inst_nop)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 142
-            self.match(ProgramParser.T__9)
+            self.state = 158
+            self.match(ProgramParser.T__10)
+        except RecognitionException as re:
+            localctx.exception = re
+            self._errHandler.reportError(self, re)
+            self._errHandler.recover(self, re)
+        finally:
+            self.exitRule()
+        return localctx
+
+
+    class Inst_retContext(ParserRuleContext):
+        __slots__ = 'parser'
+
+        def __init__(self, parser, parent:ParserRuleContext=None, invokingState:int=-1):
+            super().__init__(parent, invokingState)
+            self.parser = parser
+
+
+        def getRuleIndex(self):
+            return ProgramParser.RULE_inst_ret
+
+        def enterRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "enterInst_ret" ):
+                listener.enterInst_ret(self)
+
+        def exitRule(self, listener:ParseTreeListener):
+            if hasattr( listener, "exitInst_ret" ):
+                listener.exitInst_ret(self)
+
+
+
+
+    def inst_ret(self):
+
+        localctx = ProgramParser.Inst_retContext(self, self._ctx, self.state)
+        self.enterRule(localctx, 32, self.RULE_inst_ret)
+        try:
+            self.enterOuterAlt(localctx, 1)
+            self.state = 160
+            self.match(ProgramParser.T__11)
         except RecognitionException as re:
             localctx.exception = re
             self._errHandler.reportError(self, re)
@@ -1154,26 +1352,26 @@ class ProgramParser ( Parser ):
     def inst_fence(self):
 
         localctx = ProgramParser.Inst_fenceContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 28, self.RULE_inst_fence)
+        self.enterRule(localctx, 34, self.RULE_inst_fence)
         try:
-            self.state = 150
+            self.state = 168
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,9,self._ctx)
             if la_ == 1:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 144
-                self.match(ProgramParser.T__10)
-                self.state = 145
+                self.state = 162
+                self.match(ProgramParser.T__12)
+                self.state = 163
                 self.mem_access_op()
-                self.state = 146
+                self.state = 164
                 self.match(ProgramParser.T__2)
-                self.state = 147
+                self.state = 165
                 self.mem_access_op()
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 149
+                self.state = 167
                 self.fence_single()
                 pass
 
@@ -1212,11 +1410,11 @@ class ProgramParser ( Parser ):
     def inst_fencetso(self):
 
         localctx = ProgramParser.Inst_fencetsoContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 30, self.RULE_inst_fencetso)
+        self.enterRule(localctx, 36, self.RULE_inst_fencetso)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 152
-            self.match(ProgramParser.T__11)
+            self.state = 170
+            self.match(ProgramParser.T__13)
         except RecognitionException as re:
             localctx.exception = re
             self._errHandler.reportError(self, re)
@@ -1251,11 +1449,11 @@ class ProgramParser ( Parser ):
     def fence_single(self):
 
         localctx = ProgramParser.Fence_singleContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 32, self.RULE_fence_single)
+        self.enterRule(localctx, 38, self.RULE_fence_single)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 154
-            self.match(ProgramParser.T__10)
+            self.state = 172
+            self.match(ProgramParser.T__12)
         except RecognitionException as re:
             localctx.exception = re
             self._errHandler.reportError(self, re)
@@ -1290,55 +1488,11 @@ class ProgramParser ( Parser ):
     def inst_fencei(self):
 
         localctx = ProgramParser.Inst_fenceiContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 34, self.RULE_inst_fencei)
+        self.enterRule(localctx, 40, self.RULE_inst_fencei)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 156
-            self.match(ProgramParser.T__12)
-        except RecognitionException as re:
-            localctx.exception = re
-            self._errHandler.reportError(self, re)
-            self._errHandler.recover(self, re)
-        finally:
-            self.exitRule()
-        return localctx
-
-
-    class Inst_mem_accessContext(ParserRuleContext):
-        __slots__ = 'parser'
-
-        def __init__(self, parser, parent:ParserRuleContext=None, invokingState:int=-1):
-            super().__init__(parent, invokingState)
-            self.parser = parser
-
-        def mem_access_op(self):
-            return self.getTypedRuleContext(ProgramParser.Mem_access_opContext,0)
-
-
-        def getRuleIndex(self):
-            return ProgramParser.RULE_inst_mem_access
-
-        def enterRule(self, listener:ParseTreeListener):
-            if hasattr( listener, "enterInst_mem_access" ):
-                listener.enterInst_mem_access(self)
-
-        def exitRule(self, listener:ParseTreeListener):
-            if hasattr( listener, "exitInst_mem_access" ):
-                listener.exitInst_mem_access(self)
-
-
-
-
-    def inst_mem_access(self):
-
-        localctx = ProgramParser.Inst_mem_accessContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 36, self.RULE_inst_mem_access)
-        try:
-            self.enterOuterAlt(localctx, 1)
-            self.state = 158
-            self.match(ProgramParser.T__13)
-            self.state = 159
-            self.mem_access_op()
+            self.state = 174
+            self.match(ProgramParser.T__14)
         except RecognitionException as re:
             localctx.exception = re
             self._errHandler.reportError(self, re)
@@ -1379,19 +1533,19 @@ class ProgramParser ( Parser ):
     def mem_access_op(self):
 
         localctx = ProgramParser.Mem_access_opContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 38, self.RULE_mem_access_op)
+        self.enterRule(localctx, 42, self.RULE_mem_access_op)
         try:
-            self.state = 163
+            self.state = 178
             self._errHandler.sync(self)
             token = self._input.LA(1)
-            if token in [18]:
+            if token in [19]:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 161
+                self.state = 176
                 self.match(ProgramParser.FENCE_OP)
                 pass
-            elif token in [15, 16, 17]:
+            elif token in [16, 17, 18]:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 162
+                self.state = 177
                 self.mem_access_op_single()
                 pass
             else:
@@ -1431,13 +1585,13 @@ class ProgramParser ( Parser ):
     def mem_access_op_single(self):
 
         localctx = ProgramParser.Mem_access_op_singleContext(self, self._ctx, self.state)
-        self.enterRule(localctx, 40, self.RULE_mem_access_op_single)
+        self.enterRule(localctx, 44, self.RULE_mem_access_op_single)
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 165
+            self.state = 180
             _la = self._input.LA(1)
-            if not((((_la) & ~0x3f) == 0 and ((1 << _la) & 229376) != 0)):
+            if not((((_la) & ~0x3f) == 0 and ((1 << _la) & 458752) != 0)):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
