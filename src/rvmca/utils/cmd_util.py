@@ -6,7 +6,12 @@ from rvmca.utils import regex_util
 
 
 def run_cmd(cmd):
-    return run_cmd_with_output(cmd)
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        print(e.stderr)
+    return None
 
 
 def run_cmd_to_log(cmd, out_file, err_file):

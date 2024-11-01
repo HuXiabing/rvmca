@@ -29,12 +29,25 @@ import copy
 import angr, claripy
 from rvmca.config import *
 from rvmca.trans.compile import compile_block
+from rvmca.prog.reg import find_reg_by_name
+
+_available_regs = [
+    # TODO: check the available registers
+    find_reg_by_name(n)
+    for n in [f't{i}' for i in range(7)] + \
+             [f'a{i}' for i in [0, 1, 2, 3, 4, 6, 7]] + \
+             [f's{i}' for i in range(12)]
+]
 
 
 def _check_block_validity(prog: Program):
     """Check the validity of a block"""
     for inst in prog.insts[0:-1]:
         assert inst.type not in [IType.Branch, IType.Jump], f"{prog.insts} is not a basic block"
+    for inst in prog.insts:
+        addr = inst.get_addr()
+        if addr:
+            assert addr is not XREG[0], f"{inst} has zero address"
 
 
 def _legalize_branch(inst: Inst) -> Inst:
@@ -114,17 +127,23 @@ def find_addr_regs(prog: Program) -> List[Tuple[int, Reg]]:
     return addr_regs
 
 
-def remap_regs_for_block(prog: Program, candidate_regs: List[Reg]) -> Program:
+def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
     """Remap registers for a block"""
+    if candidate_regs is None:
+        candidate_regs = _available_regs
     _check_block_validity(prog)
 
     prog = copy.deepcopy(prog)
 
     regs = set()
-    for inst in prog.insts[0:-1]:
+    for inst in prog.insts:
         for reg in inst.get_regs():
             regs.add(reg)
     need_remap = [r for r in regs if r not in candidate_regs]
+
+    if XREG[0] in need_remap:
+        need_remap.remove(XREG[0])
+
     available_regs = [r for r in candidate_regs if r not in regs]
     assert len(need_remap) <= len(available_regs), 'Fail to remap regs. Not enough available regs!'
 
@@ -175,7 +194,7 @@ def remap_regs_for_block(prog: Program, candidate_regs: List[Reg]) -> Program:
     return prog
 
 
-def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
+def init_states_for_block(prog: Program, name: str = 'test') -> List[Inst]:
     """generate init code for a block"""
     STACK_RANGE = 0xf00
     regs_defined = {XREG[0], XREG[2]}  # x0, sp
@@ -183,10 +202,10 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
     init_code = []
 
     # compile and load binary
-    compile_block(prog, filename)
-    proj = angr.Project(OUTPUT_PATH / filename, auto_load_libs=False)
+    compile_block(prog, name)
+    proj = angr.Project(OUTPUT_PATH / name, auto_load_libs=False)
     begin_addr = proj.loader.main_object.get_symbol('rvmca_block_begin')
-    end_addr = begin_addr.rebased_addr
+    end_addr = proj.loader.main_object.get_symbol('rvmca_block_end')
     init_state = proj.factory.blank_state(addr=begin_addr.rebased_addr,
                                           add_options={angr.options.SYMBOLIC_WRITE_ADDRESSES,
                                                        angr.options.MEMORY_SYMBOLIC_BYTES_MAP,
@@ -212,6 +231,16 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
         if r:
             regs_defined.add(r)
 
+    # assign sp+offset to undefined address registers
+    for i, inst in enumerate(insts_addr_undefined):
+        addr = inst.get_addr()
+        reg_name = addr.name
+        offset = -8 * (i + 1) - inst.imm
+        setattr(init_state.regs, reg_name, init_sp + offset)
+        init_code.append(IFmtInst('addi', reg_name, 'sp', offset))
+        if addr in regs_undefined:
+            regs_undefined.remove(addr)
+
     # create variables for undefined registers
     reg_vars = {}
     for reg_name in [r.name for r in regs_undefined]:
@@ -219,41 +248,38 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
         setattr(init_state.regs, reg_name, reg_var)
         reg_vars[reg_name] = reg_var
 
-    # assign sp+offset to undefined address registers
-    for i, inst in enumerate(insts_addr_undefined):
-        reg_name = inst.get_addr().name
-        offset = -8 * (i + 1) - inst.imm
-        setattr(init_state.regs, reg_name, init_sp + offset)
-        init_code.append(IFmtInst('addi', reg_name, 'sp', offset))
-
     # create a simulation manager
     simgr = proj.factory.simulation_manager(init_state)
     addr_constraints = []
+    addr_variables = []
 
     for i, inst in enumerate(prog.insts):
+        # TODO: num_inst in prog and binary are not equal due to pseudo-instruction
         addr_reg = inst.get_addr()
         if addr_reg:
-            addr_var = getattr(simgr.one_active.regs, addr_reg.name)
-            mask = 1 << inst.width >> 1 - 1
-            address = addr_var + inst.imm
+            addr_base_var = getattr(simgr.one_active.regs, addr_reg.name)
+            import math
+            mask = (1 << math.floor(math.log2(inst.width))) - 1
+            addr_var = addr_base_var + inst.imm
+            addr_variables.append(addr_var)
             # constraint address to the stack space
-            addr_constraints.append(address & mask == 0)
-            addr_constraints.append(address >= init_sp - STACK_RANGE)
-            addr_constraints.append(address <= init_sp)
+            addr_constraints.append(addr_var & mask == 0)
+            addr_constraints.append(addr_var >= init_sp - STACK_RANGE)
+            addr_constraints.append(addr_var <= init_sp)
         simgr.step(num_inst=1)
         # TODO: consider compressed instructions
-        end_addr += 4
 
-    simgr.explore(find=end_addr)
-    assert simgr.found
+    simgr.explore(find=end_addr.rebased_addr)
+    assert simgr.found, f'simulation fails at {end_addr.rebased_addr}'
 
     solver = claripy.Solver()
     solver.add(simgr.found[0].solver.constraints)
     solver.add(addr_constraints)
+    assert solver.satisfiable(), f"[ERROR]: {name} is not satisfiable"
 
     for k, v in reg_vars.items():
         val = solver.max(v)
-        offset = (init_sp - val).concrete_value
+        offset = (init_sp - val).concrete_value & 0xffffffff
         if 0 <= offset <= 0xf00:
             init_code.append(IFmtInst('addi', k, 'sp', -offset))
         elif 0 <= offset <= STACK_RANGE:
@@ -261,5 +287,7 @@ def init_regs_for_block(prog: Program, filename: str = 'test') -> List[Inst]:
             init_code.append(RFmtInst('add', k, k, 'sp'))
         else:
             init_code.append(UFmtInst('li', k, val))
+
+    # TODO: initialize memory value? (addr_variables)
 
     return init_code

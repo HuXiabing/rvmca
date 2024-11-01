@@ -129,7 +129,7 @@ def rm_file(file_path):
 
 def rm_files_in_dir(dir_path):
     # to avoid delete important dir
-    if len(dir_path) < MIN_DIR_LEN:
+    if len(str(dir_path)) < MIN_DIR_LEN:
         assert False, "dangerous rm."
 
     logger.info(f'rm files in dir: {dir_path}')
