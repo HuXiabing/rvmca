@@ -36,6 +36,7 @@ if __name__ == '__main__':
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-p', '--profile', help='transform for profiling')
     group.add_argument('-rs', '--random_schedule', help='transform for random scheduling')
+    parser.add_argument('-m', '--max', help='max number of output files for scheduling', type=int, default=10)
 
     args = parser.parse_args()
 
@@ -43,9 +44,12 @@ if __name__ == '__main__':
 
     mk_dir_from_dir_path(OUTPUT_PATH)
 
-    from rvmca.trans import transform_for_profiling
+    from rvmca.trans import transform_for_profiling, transform_for_random_scheduling
 
     if args.profile:
         transform_for_profiling(args.input_file)
     elif args.random_schedule:
-        pass
+        if args.max <= 0:
+            print(f'Error: invalid option --max {args.max} (should be greater then 0).')
+            exit(1)
+        transform_for_random_scheduling(args.input_file, limit=args.max)

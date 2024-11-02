@@ -22,14 +22,14 @@
 """Test for RISC-V Program Parser"""
 import pytest
 
-from rvmca.trans.block import *
+from rvmca.trans.sched import *
 from rvmca.utils.file_util import *
 from rvmca.config import *
 
 all_tests = list_files(TESTS_INPUT_PATH / 'dv', '.S')
 
 
-class TestTrans:
+class TestSched:
 
     def test_one_case_with_name(self):
         filepath = '/home/xuezheng/PycharmProjects/rvmca/tests/input/dv/test805.S'
@@ -37,9 +37,20 @@ class TestTrans:
 
     @pytest.mark.parametrize('filepath', all_tests)
     def test_one_case(self, filepath):
-        transform_for_profiling(filepath)
+        transform_for_random_scheduling(filepath, limit=10)
 
-    def test_400_perlbench(self):
-        directory = INPUT_PATH / 'spec06' / '400_perlbench'
-        for file in list_files(directory, '.S'):
-            transform_for_profiling(file)
+    def test1(self):
+        program_raw = '\n'.join([
+            'add x0, x1, x2',
+            'add x0, x0, x5',
+            'add x1, x0, x8',
+        ])
+        print()
+        program = parse_program(program_raw)
+        print('<Block>:')
+        print(program.code)
+        i = 0
+        for prog in random_scheduling(program, 10):
+            print(f'\n<New Block {i}>:')
+            print(prog.code)
+            i += 1

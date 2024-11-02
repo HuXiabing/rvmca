@@ -24,7 +24,11 @@ pip install -r requirement.txt
 2. Run demo
 
 ```python
+# for profiling
 python src/rvmca/main.py -p input_file= tests/input/dv/test0.S
+
+# for scheduling
+python src/rvmca/main.py -rs input_file= tests/input/dv/test0.S -m 0
 ```
 
 ## Contributors

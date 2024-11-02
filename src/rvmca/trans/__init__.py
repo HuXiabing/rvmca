@@ -20,4 +20,5 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from rvmca.trans.block import *
+from rvmca.trans.prof import *
+from rvmca.trans.sched import *
