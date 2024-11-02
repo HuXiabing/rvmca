@@ -21,7 +21,11 @@ If pip fails in the process, use conda instead.
 pip install -r requirement.txt
 ```
 
-2. Coming soon...
+2. Run demo
+
+```python
+python src/rvmca/main.py -p input_file= tests/input/dv/test0.S
+```
 
 ## Contributors
 

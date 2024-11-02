@@ -24,12 +24,13 @@
 
 from typing import List, Tuple
 
-from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, JalrInst
+from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, JalrInst, parse_program
 import copy
 import angr, claripy
 from rvmca.config import *
-from rvmca.trans.compile import compile_block
 from rvmca.prog.reg import find_reg_by_name
+from rvmca.utils.cmd_util import run_cmd
+from rvmca.utils.file_util import rm_file, read_file, write_to_file
 
 _available_regs = [
     # TODO: check the available registers
@@ -194,16 +195,23 @@ def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
     return prog
 
 
-def init_states_for_block(prog: Program, name: str = 'test') -> List[Inst]:
+def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     """generate init code for a block"""
     STACK_RANGE = 0xf00
     regs_defined = {XREG[0], XREG[2]}  # x0, sp
     regs_undefined, insts_addr_undefined = set(), set()
     init_code = []
 
+    def compile_block(program: Program, bin_name: str):
+        wrapper_path = PROJECT_PATH / 'src' / 'rvmca' / 'trans' / 'template' / 'block_wrapper.S'
+        wrapper = read_file(wrapper_path)
+        wrapper = wrapper.replace('#CODE#', program.code)
+        write_to_file(f'{OUTPUT_PATH / bin_name}.S', wrapper, append=False)
+        run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / bin_name}.S -o {OUTPUT_PATH / bin_name}.exe')
+
     # compile and load binary
     compile_block(prog, name)
-    proj = angr.Project(OUTPUT_PATH / name, auto_load_libs=False)
+    proj = angr.Project(f'{OUTPUT_PATH / name}.exe', auto_load_libs=False)
     begin_addr = proj.loader.main_object.get_symbol('rvmca_block_begin')
     end_addr = proj.loader.main_object.get_symbol('rvmca_block_end')
     init_state = proj.factory.blank_state(addr=begin_addr.rebased_addr,
@@ -291,3 +299,78 @@ def init_states_for_block(prog: Program, name: str = 'test') -> List[Inst]:
     # TODO: initialize memory value? (addr_variables)
 
     return init_code
+
+
+def transform_for_profiling(filepath, output_path=''):
+    def assemble_code(code: str, name: str, suffix: str = 'code'):
+        """Output a file named {name}.code"""
+        write_to_file(f'{OUTPUT_PATH / name}.S', code, append=False)
+        run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / name}.S -c -o {OUTPUT_PATH / name}.o')
+        output = run_cmd(f'{RISCV_OBJDUMP} -d {OUTPUT_PATH / name}.o')
+
+        import re
+        pattern = r'^\s*[0-9a-f]+:\s+(.*)'
+        # pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
+        machine_code = '\n'.join(re.findall(pattern, output, re.MULTILINE))
+        write_to_file(f'{OUTPUT_PATH / name}.{suffix}', machine_code, append=False)
+        return machine_code
+
+    # read file
+    print(f'transform [{filepath}]')
+    test_name = filepath.split('/')[-1].replace('.S', '')
+    content = read_file(filepath) + '\n'
+    failed = False
+    error_msg = ""
+
+    if output_path == '':
+        output_path = f"{OUTPUT_PATH / test_name}"
+
+    try:
+        # transform block
+        print('<Block>:')
+        print(content)
+        prog = parse_program(content)
+        prog = remap_regs_for_block(prog)
+        prog = zero_imm_for_block(prog)
+        prog = legalize_jump_and_branch(prog)
+        print('<New Block>:')
+        print(prog.code)
+        init_insts = init_states_for_block(prog, name=test_name)
+        init_code = '\n'.join([inst.code for inst in init_insts])
+        test_code = '\n'.join([inst.code for inst in prog.insts])
+        print('\n<New Block with init code>:')
+        print('# init code')
+        print(init_code)
+        print('# test code')
+        print(test_code)
+
+        assemble_code(init_code, test_name, suffix='init')
+        assemble_code(test_code, test_name)
+
+        # run new block with pp
+        result = run_cmd(f"qemu-riscv64 {TOOLS_PATH / 'pp' / 'pp'} {OUTPUT_PATH / test_name}")
+
+        if not result:
+            run_cmd(f"echo '# init code' > {output_path}.error")
+            run_cmd(f"cat {OUTPUT_PATH / test_name}.init >> {output_path}.error")
+            run_cmd(f"echo '\n\n# test code' >> {output_path}.error")
+            run_cmd(f"cat {OUTPUT_PATH / test_name}.code >> {output_path}.error")
+            run_cmd(f"echo '\n\nError: pp fails.' >> {output_path}.error")
+            rm_file(f"{OUTPUT_PATH / test_name}.code")
+            rm_file(f"{OUTPUT_PATH / test_name}.init")
+        else:
+            run_cmd(f"mv {OUTPUT_PATH / test_name}.code {output_path}.code")
+            run_cmd(f"mv {OUTPUT_PATH / test_name}.init {output_path}.init")
+        assert result, "Error: pp fails."
+    except Exception as e:
+        print(e)
+        error_msg = e
+        failed = True
+    finally:
+        rm_file(f"{OUTPUT_PATH / test_name}.o")
+        rm_file(f"{OUTPUT_PATH / test_name}.S")
+        rm_file(f"{OUTPUT_PATH / test_name}.exe")
+        if not failed:
+            print(f'Successfully!\n')
+        else:
+            raise AssertionError(error_msg)

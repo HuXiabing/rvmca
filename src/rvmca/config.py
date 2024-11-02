@@ -96,8 +96,10 @@ PROJECT_PATH = _current_path.parent.parent.parent
 TOOLS_PATH = PROJECT_PATH / "tools"
 TESTS_PATH = PROJECT_PATH / "tests"
 
-OUTPUT_PATH = TESTS_PATH / 'output'
-INPUT_PATH = TESTS_PATH / 'input'
+OUTPUT_PATH = PROJECT_PATH / 'output'
+TESTS_OUTPUT_PATH = TESTS_PATH / 'output'
+INPUT_PATH = PROJECT_PATH / 'input'
+TESTS_INPUT_PATH = TESTS_PATH / 'input'
 
 RISCV_TOOLCHAIN = 'riscv64-unknown-linux-gnu-'
 RISCV_GCC = RISCV_TOOLCHAIN + 'gcc'

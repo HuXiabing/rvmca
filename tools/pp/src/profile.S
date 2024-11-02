@@ -10,12 +10,17 @@
 profile0:
 	fence
 	__COUNT_START
+
+	.rept PIPELINE_DEPTH
+	nop
+	.endr
+
 	__COUNT_END
 	fence
 	sub	a0,a0,a5
 	ret
 	.globl	profileN
-	.globl  profile_insn_start
+	.globl  profile_insn_start, profile_insn_init
 	.type	profileN, @function
 profileN:
 	fence
@@ -32,9 +37,17 @@ profileN:
 	sd s9, 72(sp)
 	sd s10, 80(sp)
 	sd s11, 88(sp)
+profile_insn_init:
+	.rept MAX_INSN
+	nop
+	.endr
+	fence
 	__COUNT_START
+	.rept PIPELINE_DEPTH
+	nop
+	.endr
 profile_insn_start:
-	.rept 200
+	.rept MAX_INSN
 	nop
 	.endr
 	fence
