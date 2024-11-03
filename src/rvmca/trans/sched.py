@@ -34,8 +34,15 @@ def random_scheduling(program: Program, limit=1000):
 
     dag = {k: set() for k in program.insts}
 
+    # preserve the last inst if it is a branch or jump
+    last_inst = program.insts[-1]
+    if last_inst.type in [IType.Branch, IType.Jump]:
+        for inst in program.insts[:-1]:
+            dag[inst].add(last_inst)
+
     # preserve the order of memory instructions
-    mem_insts = [i for i in program.insts if i.type in [IType.Load, IType.Store, IType.Amo]]
+    mem_insts = [i for i in program.insts if i.type in
+                 [IType.Load, IType.Store, IType.Amo, IType.Fence, IType.FenceI]]
     for i in range(len(mem_insts) - 1):
         prev, next = mem_insts[i], mem_insts[i + 1]
         dag[prev].add(next)

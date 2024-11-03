@@ -54,3 +54,21 @@ class TestSched:
             print(f'\n<New Block {i}>:')
             print(prog.code)
             i += 1
+
+    def test2(self):
+        program_raw = '\n'.join([
+            'ld x1, 0(x2)',
+            'fence',
+            'sd x4, 0(x3)',
+            'add x1, x1, x1',
+            'bne x5, x6, 0'
+        ])
+        print()
+        program = parse_program(program_raw)
+        print('<Block>:')
+        print(program.code)
+        i = 0
+        for prog in random_scheduling(program, 10):
+            print(f'\n<New Block {i}>:')
+            print(prog.code)
+            i += 1
