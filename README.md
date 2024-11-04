@@ -33,14 +33,6 @@ pip install .
 
 ## Quick Start
 
-1. Install required packages:
-
-```bash
-pip install -r requirement.txt
-```
-
-2. Run demo
-
 ```python
 # for profiling
 python src/rvmca/main.py -p input_file= tests/input/dv/test0.S
