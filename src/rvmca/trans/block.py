@@ -19,7 +19,14 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from typing import List
+
+from rvmca.config import *
 from rvmca.prog import Program, IType, XREG
+from rvmca.utils.cmd_util import run_cmd
+from rvmca.utils.file_util import write_to_file
+import random
+import string
 
 
 def check_block_validity(prog: Program):
@@ -30,3 +37,43 @@ def check_block_validity(prog: Program):
         addr = inst.get_addr()
         if addr:
             assert addr is not XREG[0], f"{inst} has zero address"
+
+
+def __generate_random_string(length=6):
+    characters = string.ascii_letters + string.digits
+    random_string = ''.join(random.choice(characters) for i in range(length))
+    return random_string
+
+
+def assemble(insts: List[str]) -> List[str]:
+    """assemble insts to codes"""
+    code = '\n'.join(insts)
+    tmp_filename = f'{OUTPUT_PATH / __generate_random_string()}'
+    write_to_file(f'{tmp_filename}.S', code, append=False)
+    run_cmd(f'{RISCV_GCC} {tmp_filename}.S -c -o {tmp_filename}.o')
+    output = run_cmd(f'{RISCV_OBJDUMP} -d {tmp_filename}.o')
+    run_cmd(f'rm {tmp_filename}.S {tmp_filename}.o')
+
+    import re
+    pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
+    return re.findall(pattern, output, re.MULTILINE)
+
+
+def disassemble(codes: List[str]) -> List[str]:
+    def to_little_endian(s):
+        ss = [s[i:i + 2] for i in range(0, len(s), 2)]
+        ss.reverse()
+        return ''.join(ss)
+
+    codes_le = [to_little_endian(s) for s in codes]
+    hex_data = '\n'.join(codes_le)
+    bin_data = bytes.fromhex(hex_data)
+    tmp_filename = f'{OUTPUT_PATH / __generate_random_string()}'
+    with open(f'{tmp_filename}.bin', 'wb') as file:
+        file.write(bin_data)
+    output = run_cmd(f'{RISCV_OBJDUMP} -D -b binary -m riscv -M numeric,no-aliases {tmp_filename}.bin')
+    run_cmd(f'rm {tmp_filename}.bin')
+
+    import re
+    pattern = r'^\s*[0-9a-f]+:\s+[0-9a-f]+\s+(.*)'
+    return re.findall(pattern, output, re.MULTILINE)
