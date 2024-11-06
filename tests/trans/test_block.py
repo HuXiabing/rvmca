@@ -20,8 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """Test for RISC-V Block"""
-import pytest
-
 from rvmca.trans import assemble, disassemble
 
 

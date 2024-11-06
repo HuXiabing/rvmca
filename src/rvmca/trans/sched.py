@@ -137,6 +137,6 @@ def transform_for_random_scheduling(filepath, output_path='', limit=1000):
     prog = parse_program(content)
     i = 0
     for new_prog in random_scheduling(prog, limit):
-        write_to_file(f'{output_path}-{i}.S', new_prog.code)
+        write_to_file(f'{output_path}-{i}.S', new_prog.code, append=False)
         i += 1
     print(f'Successfully generate {i} files ({output_path}-*.S).')
