@@ -27,6 +27,7 @@ from rvmca.utils.cmd_util import run_cmd
 from rvmca.utils.file_util import write_to_file
 import random
 import string
+import re
 
 
 def check_block_validity(prog: Program):
@@ -45,7 +46,7 @@ def __generate_random_string(length=6):
     return random_string
 
 
-def assemble(insts: List[str]) -> List[str]:
+def __assemble(insts: List[str]) -> str:
     """assemble insts to codes"""
     code = '\n'.join(insts)
     tmp_filename = f'{OUTPUT_PATH / __generate_random_string()}'
@@ -54,8 +55,20 @@ def assemble(insts: List[str]) -> List[str]:
     output = run_cmd(f'{RISCV_OBJDUMP} -d {tmp_filename}.o')
     run_cmd(f'rm {tmp_filename}.S {tmp_filename}.o')
 
-    import re
+    return output
+
+
+def assemble(insts: List[str]) -> List[str]:
+    """assemble insts to codes"""
+    output = __assemble(insts)
     pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
+    return re.findall(pattern, output, re.MULTILINE)
+
+
+def assemble_pp_code(insts: List[str]) -> List[str]:
+    """assemble insts to pp codes"""
+    output = __assemble(insts)
+    pattern = r'^\s*[0-9a-f]+:\s+(.*)'
     return re.findall(pattern, output, re.MULTILINE)
 
 
@@ -74,6 +87,5 @@ def disassemble(codes: List[str]) -> List[str]:
     output = run_cmd(f'{RISCV_OBJDUMP} -D -b binary -m riscv -M numeric,no-aliases {tmp_filename}.bin')
     run_cmd(f'rm {tmp_filename}.bin')
 
-    import re
     pattern = r'^\s*[0-9a-f]+:\s+[0-9a-f]+\s+(.*)'
     return re.findall(pattern, output, re.MULTILINE)

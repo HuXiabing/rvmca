@@ -22,4 +22,4 @@
 
 from rvmca.trans.prof import *
 from rvmca.trans.sched import *
-from rvmca.trans.block import assemble, disassemble
+from rvmca.trans.block import assemble, disassemble, assemble_pp_code

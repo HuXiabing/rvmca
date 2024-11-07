@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 """Test for RISC-V Block"""
-from rvmca.trans import assemble, disassemble
+from rvmca.trans import *
 
 
 class TestBlock:
@@ -28,6 +28,11 @@ class TestBlock:
     def test_assemble(self):
         src = ['add x0, x1, x2', 'mul x3, x4, x4']
         code = assemble(src)
+        print(code)
+
+    def test_assemble_pp(self):
+        src = ['add x0, x1, x2', 'mul x3, x4, x4']
+        code = assemble_pp_code(src)
         print(code)
 
     def test_disassemble(self):
