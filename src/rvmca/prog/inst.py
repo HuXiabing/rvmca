@@ -672,6 +672,64 @@ class Label:
         return f'{self.label}:'
 
 
+class FRRFmtInst(Inst):
+    def __init__(self, name: str, rd: str, rs1: str):
+        super().__init__(name)
+        self.rd, self.rs1 = (find_reg_by_name(name)
+                             for name in [rd, rs1])
+        self.type = IType.Normal
+
+    @property
+    def operands(self):
+        return self.rd, self.rs1
+
+    def get_def(self):
+        return self.rd
+
+    def get_uses(self):
+        return [self.rs1]
+
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1 = regs[0]
+
+    def mnemonic(self, operands):
+        rd, rs1 = operands
+        return f'{self.name} {rd}, {rs1}'
+
+
+class FRRRRFmtInst(Inst):
+    def __init__(self, name: str, rd: str, rs1: str, rs2: str, rs3: str):
+        super().__init__(name)
+        self.rd, self.rs1, self.rs2, self.rs3 = (find_reg_by_name(name)
+                                                 for name in [rd, rs1, rs2, rs3])
+        self.type = IType.Normal
+
+    @property
+    def operands(self):
+        return self.rd, self.rs1, self.rs2, self.rs3
+
+    def get_def(self):
+        return self.rd
+
+    def get_uses(self):
+        return [self.rs1, self.rs2, self.rs3]
+
+    def set_def(self, r: Reg):
+        self.rd = r
+
+    def set_uses(self, regs: List[Reg]):
+        assert len(regs) == len(self.get_uses())
+        self.rs1, self.rs2, self.rs3 = regs[0], regs[1], regs[2]
+
+    def mnemonic(self, operands):
+        rd, rs1, rs2, rs3 = operands
+        return f'{self.name} {rd}, {rs1}, {rs2}, {rs3}'
+
+
 class SSAInst:
     """
     build from an Inst

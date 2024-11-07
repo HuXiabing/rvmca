@@ -41,3 +41,17 @@ class TestProg:
         for file in list_files(directory, '.S'):
             content = read_file(file) + '\n'
             parse_program(content)
+
+    def test_fp(self):
+        text =  'fabs.d f1, f5\n' \
+                'fclass.d x3, f3\n' \
+                'fcvt.d.w f1, x3\n' \
+                'fdiv.d f3, f4, f6\n' \
+                'fld f31, -12(sp)\n' \
+                'fle.s x8, f30, f31\n' \
+                'fmadd.s f2, f5, f17, f4\n' \
+                'fmv.x.d x3, f4\n' \
+                'fmv.d.x f3, x4\n' \
+                'fsd f8, 36(x5)'
+        program = parse_program(text)
+        print(program.insts)

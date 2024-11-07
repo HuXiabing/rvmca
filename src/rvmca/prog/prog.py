@@ -86,6 +86,60 @@ class ProgramParseListener(ProgramListener):
             inst = RFmtInst('or', rd, rs1, rs2)
         self.program.insts.append(inst)
 
+    def enterInst_f_f_f(self, ctx: ProgramParser.Inst_f_f_fContext):
+        rd, rs1, rs2 = (ctx.FREG(i).getText() for i in range(3))
+        self.program.insts.append(RFmtInst(ctx.FFF_NAME().getText(), rd, rs1, rs2))
+
+    def enterInst_fcsr(self, ctx: ProgramParser.Inst_fcsrContext):
+        # TODO
+        raise NotImplementedError
+
+    def enterInst_fscsr(self, ctx: ProgramParser.Inst_fscsrContext):
+        # TODO
+        raise NotImplementedError
+
+    def enterInst_f_x(self, ctx: ProgramParser.Inst_f_xContext):
+        rd, rs1 = ctx.FREG().getText(), ctx.REG().getText()
+        self.program.insts.append(FRRFmtInst(ctx.FX_NAME().getText(), rd, rs1))
+
+    def enterInst_x_f(self, ctx: ProgramParser.Inst_x_fContext):
+        rd, rs1 = ctx.REG().getText(), ctx.FREG().getText()
+        self.program.insts.append(FRRFmtInst(ctx.XF_NAME().getText(), rd, rs1))
+
+    def enterInst_f_f(self, ctx: ProgramParser.Inst_f_fContext):
+        rd, rs1 = ctx.FREG(0).getText(), ctx.FREG(1).getText()
+        name = ctx.FF_NAME().getText()
+        if name.startswith('fabs'):
+            inst = RFmtInst(name.replace('fabs', 'fsgnjx'), rd, rs1, rs1)
+        elif name.startswith('fmv'):
+            inst = RFmtInst(name.replace('fabs', 'fsgnj'), rd, rs1, rs1)
+        elif name.startswith('fneg'):
+            inst = RFmtInst(name.replace('fabs', 'fsgnjn'), rd, rs1, rs1)
+        else:
+            inst = FRRFmtInst(name, rd, rs1)
+
+        self.program.insts.append(inst)
+
+    def enterInst_x_f_f(self, ctx: ProgramParser.Inst_x_f_fContext):
+        rd, rs1, rs2 = ctx.REG().getText(), ctx.FREG(0).getText(), ctx.FREG(1).getText()
+        self.program.insts.append(RFmtInst(ctx.XFF_NAME().getText(), rd, rs1, rs2))
+
+    def enterInst_f_ldst(self, ctx: ProgramParser.Inst_f_ldstContext):
+        name = ctx.F_LDST_NAME().getText()
+        rd, imm, rs1 = ctx.FREG().getText(), int(ctx.IMM().getText()), ctx.REG().getText()
+        if name.startswith('fl'):
+            inst = LoadInst(name, rd, rs1, imm)
+        elif name.startswith('fs'):
+            inst = StoreInst(name, rd, rs1, imm)
+        else:
+            raise NotImplementedError(name)
+
+        self.program.insts.append(inst)
+
+    def enterInst_f_f_f_f(self, ctx: ProgramParser.Inst_f_f_f_fContext):
+        rd, rs1, rs2, rs3 = [ctx.FREG(i).getText() for i in range(4)]
+        self.program.insts.append(FRRRRFmtInst(ctx.FFFF_NAME().getText(), rd, rs1, rs2, rs3))
+
     def enterAmofmt(self, ctx: ProgramParser.AmofmtContext):
         rd, rs2, rs1 = (ctx.REG(i).getText() for i in range(3))
         name = ctx.AMO_NAME().getText()

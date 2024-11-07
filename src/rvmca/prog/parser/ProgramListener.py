@@ -215,5 +215,95 @@ class ProgramListener(ParseTreeListener):
         pass
 
 
+    # Enter a parse tree produced by ProgramParser#inst_fp.
+    def enterInst_fp(self, ctx:ProgramParser.Inst_fpContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_fp.
+    def exitInst_fp(self, ctx:ProgramParser.Inst_fpContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_f_f_f.
+    def enterInst_f_f_f(self, ctx:ProgramParser.Inst_f_f_fContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_f_f_f.
+    def exitInst_f_f_f(self, ctx:ProgramParser.Inst_f_f_fContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_fcsr.
+    def enterInst_fcsr(self, ctx:ProgramParser.Inst_fcsrContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_fcsr.
+    def exitInst_fcsr(self, ctx:ProgramParser.Inst_fcsrContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_fscsr.
+    def enterInst_fscsr(self, ctx:ProgramParser.Inst_fscsrContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_fscsr.
+    def exitInst_fscsr(self, ctx:ProgramParser.Inst_fscsrContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_f_x.
+    def enterInst_f_x(self, ctx:ProgramParser.Inst_f_xContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_f_x.
+    def exitInst_f_x(self, ctx:ProgramParser.Inst_f_xContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_x_f.
+    def enterInst_x_f(self, ctx:ProgramParser.Inst_x_fContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_x_f.
+    def exitInst_x_f(self, ctx:ProgramParser.Inst_x_fContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_f_f.
+    def enterInst_f_f(self, ctx:ProgramParser.Inst_f_fContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_f_f.
+    def exitInst_f_f(self, ctx:ProgramParser.Inst_f_fContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_x_f_f.
+    def enterInst_x_f_f(self, ctx:ProgramParser.Inst_x_f_fContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_x_f_f.
+    def exitInst_x_f_f(self, ctx:ProgramParser.Inst_x_f_fContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_f_ldst.
+    def enterInst_f_ldst(self, ctx:ProgramParser.Inst_f_ldstContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_f_ldst.
+    def exitInst_f_ldst(self, ctx:ProgramParser.Inst_f_ldstContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_f_f_f_f.
+    def enterInst_f_f_f_f(self, ctx:ProgramParser.Inst_f_f_f_fContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_f_f_f_f.
+    def exitInst_f_f_f_f(self, ctx:ProgramParser.Inst_f_f_f_fContext):
+        pass
+
+
 
 del ProgramParser
