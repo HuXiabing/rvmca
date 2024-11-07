@@ -130,7 +130,9 @@ def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
     regs = set()
     for inst in prog.insts:
         for reg in inst.get_regs():
-            regs.add(reg)
+            # FIXME: we only consider xregs for now
+            if reg in XREG:
+                regs.add(reg)
     need_remap = [r for r in regs if r not in candidate_regs]
 
     if XREG[0] in need_remap:
@@ -220,6 +222,9 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     # collect undefined registers
     for inst in prog.insts:
         for r in inst.get_uses():
+            # FIXME: we only consider xregs for now
+            if r not in XREG:
+                continue
             if r not in regs_defined:
                 if inst.get_addr() == r:
                     insts_addr_undefined.add(inst)

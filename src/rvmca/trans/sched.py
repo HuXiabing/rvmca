@@ -21,7 +21,6 @@
 # SOFTWARE.
 
 """Instruction Scheduling"""
-from rvmca.config import OUTPUT_PATH
 from rvmca.trans.block import *
 
 from rvmca.prog import IType, Program, parse_program
