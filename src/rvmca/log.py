@@ -34,7 +34,7 @@ LOG_LEVELS = [
     'ERROR'
 ]
 
-LOG_LEVEL = 'ERROR'
+LOG_LEVEL = 'DEBUG'
 
 # set the debug level here
 logger.remove()

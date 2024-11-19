@@ -88,3 +88,7 @@ def find_reg_by_name(name: str):
         if r.name == name or r.abi_name == name:
             return r
     return None
+
+
+def bitvec_to_reg(bitvec) -> Reg:
+    return find_reg_by_name(str(bitvec).split('_')[0])

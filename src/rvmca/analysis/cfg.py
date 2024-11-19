@@ -22,6 +22,7 @@
 
 """Control Flow Graph (CFG)"""
 
+from rvmca.analysis.base import *
 import time
 from typing import List, Dict
 
@@ -32,12 +33,13 @@ from rvmca import config
 from rvmca.prog import Inst, IType, SSAInst
 from rvmca.utils.plot import plot_graph, AGraphNode, AGraphEdge
 
+
 # colors
 GREEN = '#95BE91'
 RED = '#B22222'
 
 
-class CFGNode:
+class CFGNode(BaseNode):
     """The CFG node.
 
     Parameters
@@ -69,9 +71,7 @@ class CFGNode:
         """
         value is None or a xxxInst
         """
-        self.value = value
-        self.label = str(value) if label is None else label
-        self.preds, self.succs = [], []
+        super().__init__(value, label)
 
         if isinstance(value, Inst):
             self.shape = 'polygon'
@@ -87,10 +87,6 @@ class CFGNode:
     def is_end(self):
         return self.label == 'end'
 
-    def __repr__(self):
-        """facilitate debugging"""
-        return f"{self.label}"
-
 
 BRANCH_TRUE = "true"
 BRANCH_FALSE = "false"
@@ -98,7 +94,7 @@ SC_SUCCEED = "sc_succeed"
 SC_FAIL = "sc_fail"
 
 
-class CFGEdge:
+class CFGEdge(BaseEdge):
     """The CFG edge.
 
     Parameters
@@ -112,17 +108,15 @@ class CFGEdge:
     """
 
     def __init__(self, src: CFGNode, tgt: CFGNode, attr: str = ""):
-        self.src, self.tgt, self.attr = src, tgt, attr
-
-    def __repr__(self):
-        return f'({self.src.label} -> {self.tgt.label})'
+        super().__init__(src, tgt, attr)
 
 
-def path_to_ssa(path: List[CFGEdge], pid: int = 0) -> List[SSAInst]:
+def path_to_ssa(path: List[CFGEdge]) -> List[SSAInst]:
     insts = []
     r2i = {}  # reg -> index
     r2v = {}  # reg -> var (BitVec)
     ssa_idx = 0
+    x0 = BitVec('x0_0', config.REG_SIZE)
     for edge in path:
         # record the taken flag for branches (we use it later in symbolic execution phase).
         # FIXME: we assume that the last inst in insts is the src inst (only valid in simple path).
@@ -143,27 +137,30 @@ def path_to_ssa(path: List[CFGEdge], pid: int = 0) -> List[SSAInst]:
         ssa_inst = SSAInst(inst, ssa_idx)
         ssa_idx += 1
 
-        reg_sym_name = lambda x, i: f'{x}_p{pid}_{i}'
+        reg_sym_name = lambda x, i: f'{x}_{i}'
 
         # for each used register, map it to the existing variable or a new one (if not exist).
         for u in inst.get_uses():
             idx = r2i.setdefault(u.name, 0)
-            var = r2v.setdefault(u.name, BitVec(reg_sym_name(u, idx), config.REG_SIZE))
-            ssa_inst.rmap[u] = var
+            if u.name == 'x0':
+                var = x0
+            else:
+                var = r2v.setdefault(u.name, BitVec(reg_sym_name(u, idx), config.REG_SIZE))
+            ssa_inst.use_rmap[u] = var
 
         # for the defined register, map it to a new variable.
         d = inst.get_def()
         if d is not None:
             if d.name == 'x0':
                 idx = 0
-                var = r2v.setdefault(d, BitVec(reg_sym_name(d, idx), config.REG_SIZE))
+                var = r2v.setdefault(d, x0)
             else:
-                # defined register index starts from 1 instead of 0 because litmus init may define it
+                # defined register index starts from 1
                 idx = r2i[d.name] + 1 if d.name in r2i else 1
                 var = BitVec(reg_sym_name(d, idx), config.REG_SIZE)
                 r2v[d.name] = var
             r2i[d.name] = idx
-            ssa_inst.rmap[d] = var
+            ssa_inst.def_rmap[d] = var
 
         insts.append(ssa_inst)
 
@@ -173,7 +170,7 @@ def path_to_ssa(path: List[CFGEdge], pid: int = 0) -> List[SSAInst]:
     return insts
 
 
-class CFG:
+class CFG(BaseGraph):
     """The control flow graph (CFG).
 
     Parameters
@@ -199,27 +196,19 @@ class CFG:
     idx = 0
 
     def __init__(self, inputs: List[Inst], name: str = None):
+        super().__init__(inputs, name)
         self.start, self.end = CFGNode(label='start'), CFGNode(label='end')
         self.undef = CFGNode(label='undef')
-        self.nodes, self.edges = [], []
         self._construct(inputs)
 
-        if name is None:
+        if self.name is None:
             # get valid file name format for both Linux and Windows os. (Tue May 30 18:55:38 2023 ->
             # self.name = f'{time.strftime("%Y-%m-%d_%H-%M-%S")}_{CFG.idx}'
             self.name = f'{time.strftime("%Y-%m-%d")}_{CFG.idx}'
             CFG.idx += 1
-        else:
-            self.name = name
 
-    def add_edge(self, src: CFGNode, tgt: CFGNode, attr: str = ""):
-        """Add an edge from src to tgt."""
-        if tgt not in src.succs:
-            src.succs.append(tgt)
-        if src not in tgt.preds:
-            tgt.preds.append(src)
-        if (src, tgt) not in self.edges:
-            self.edges.append(CFGEdge(src, tgt, attr))
+    def _construct_edge(self, src, tgt, attr):
+        return CFGEdge(src, tgt, attr)
 
     def _verify(self):
         """Verify the legitimacy of the CFG"""
@@ -301,12 +290,6 @@ class CFG:
             return edges
 
         return [find_cfg_edges(path) for path in paths]
-
-    def plot(self, filename=None):
-        """Plot the CFG."""
-        nodes = [AGraphNode(name=n.label, shape=n.shape) for n in self.nodes]
-        edges = [AGraphEdge(e.src.label, e.tgt.label, e.attr) for e in self.edges]
-        plot_graph(self.name if filename is None else filename, nodes, edges)
 
     def plot_path(self, path: List[CFGEdge], filename=None):
         """Plot the path on the CFG (path is a list of CFG edges)."""

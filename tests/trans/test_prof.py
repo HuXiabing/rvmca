@@ -22,17 +22,18 @@
 """Test for RISC-V Program Parser"""
 import pytest
 
+from rvmca.analysis import CFG, path_to_ssa, DDG, RDG
 from rvmca.trans.prof import *
 from rvmca.utils.file_util import *
 from rvmca.config import *
 
-all_tests = list_files(TESTS_INPUT_PATH / 'dv', '.S')
-
+all_tests = list_files(TESTS_INPUT_PATH / 'coremark-gcc14-O2', '.S')
+# all_tests = list_files(TESTS_INPUT_PATH / 'manual', '.S')
 
 class TestProf:
 
     def test_one_case_with_name(self):
-        filepath = '/home/xuezheng/PycharmProjects/rvmca/tests/input/dv/test805.S'
+        filepath = '/home/xuezheng/PycharmProjects/rvmca/input/test.S'
         self.test_one_case(filepath)
 
     @pytest.mark.parametrize('filepath', all_tests)
@@ -43,3 +44,48 @@ class TestProf:
         directory = INPUT_PATH / 'spec06' / '400_perlbench'
         for file in list_files(directory, '.S'):
             transform_for_profiling(file)
+
+    def test_manual(self):
+        directory = TESTS_INPUT_PATH / 'manual'
+        for file in list_files(directory, '.S'):
+            transform_for_profiling(file)
+
+    def test_fail(self):
+        # file = TESTS_INPUT_PATH / 'manual' / '6.S'
+        file = TESTS_INPUT_PATH / 'coremark-gcc14-O2' / 'block-2.S'
+        transform_for_profiling(file)
+
+    def test_cfg(self):
+        filepath = INPUT_PATH / 'test.S'
+        content = read_file(filepath) + '\n'
+        prog = parse_program(content)
+        prog = remap_regs_for_block(prog)
+        prog = zero_imm_for_block(prog)
+        prog = legalize_jump_and_branch(prog)
+
+        cfg = CFG(prog.insts)
+        cfg.plot(OUTPUT_PATH / 'test')
+        ssas = path_to_ssa(cfg.edges)
+        print()
+        print('\n'.join([str(ssa) for ssa in ssas]))
+
+    def test_ddg_rdg(self):
+        filepath = INPUT_PATH / 'test.S'
+        content = read_file(filepath) + '\n'
+        prog = parse_program(content)
+        prog = remap_regs_for_block(prog)
+        prog = zero_imm_for_block(prog)
+        prog = legalize_jump_and_branch(prog)
+
+        cfg = CFG(prog.insts)
+        cfg.plot(OUTPUT_PATH / 'test.cfg')
+        ssas = path_to_ssa(cfg.edges)
+        print()
+        print('\n'.join([str(ssa) for ssa in ssas]))
+
+        ddg = DDG(ssas)
+        ddg.plot(OUTPUT_PATH / 'test.ddg')
+
+        rdg = RDG(ssas)
+        rdg.plot(OUTPUT_PATH / 'test.rdg')
+

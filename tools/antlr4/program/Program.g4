@@ -16,16 +16,18 @@ ifmt: I_FMT_NAME REG ',' REG ',' IMM ;
 // sw.rl /home/apr/tools/mappo/dataset/input/dataset_riscv_litmus/ATOMICS/RELAX/PodRWPX/LB+poprl+popx_has_ppo_0.litmus sw.rl
 //mfmt: (LD_NAME(MO_FLAG)? | SD_NAME(MO_FLAG)? | JALR) REG ',' IMM '(' REG ')' ;
 mfmt: (LD_NAME | SD_NAME | JALR) REG ',' IMM '(' REG ')' ;
-bfmt: (B_FMT_NAME | BRANCH_PSEUDO_NAME) REG ',' REG ',' (LABEL | IMM);
+bfmt: B_FMT_NAME REG ',' REG ',' (LABEL | IMM);
 jfmt: 'jal' REG ',' (LABEL | IMM)  ;
 ufmt: U_FMT_NAME REG ',' IMM ;
 amofmt: AMO_NAME(MO_FLAG)? REG ',' REG ',' IMM?'(' REG ')';
-pseudo : inst_j | inst_jr | inst_nop | inst_bz | inst_mv | inst_ret;
+pseudo : inst_j | inst_jr | inst_nop | inst_bz | inst_mv | inst_ret | inst_neg | inst_bgtle;
 
-inst_bz: BRANCH_PSEUDO_NAME  REG ',' (LABEL | IMM);
+inst_bz: BRANCH_PSEUDO_ZERO_NAME  REG ',' (LABEL | IMM);
+inst_bgtle: BRANCH_PSEUDO_NAME REG ',' REG ',' (LABEL | IMM);
 inst_j: 'j' (LABEL | IMM) ;
 inst_jr: 'jr' REG ;
 inst_mv: 'mv' REG ',' REG ;
+inst_neg: NEG_NAME REG ',' REG ;
 inst_nop: 'nop' ;
 inst_ret: 'ret' ;
 inst_fence: ('fence' mem_access_op ',' mem_access_op) | fence_single;
@@ -47,6 +49,7 @@ inst_x_f_f: XFF_NAME REG ',' FREG ',' FREG;
 inst_f_ldst: F_LDST_NAME FREG ',' IMM '(' REG ')' ;
 inst_f_f_f_f: FFFF_NAME FREG ',' FREG ',' FREG ',' FREG;
 
+NEG_NAME: 'neg' | 'negw';
 FFF_NAME: 'fsub.d' | 'fsub.s' | 'fsqrt.d' | 'fsqrt.s' | 'fsgnjx.d' | 'fsgnjx.s' | 'fsgnj.d' | 'fsgnj.s' | 'fsgnjn.d' | 'fsgnjn.s' | 'fadd.d' | 'fadd.s' | 'fdiv.s' | 'fdiv.d' | 'fmax.d' | 'fmax.s' | 'fmin.d' | 'fmin.s' | 'fmul.d' | 'fmul.s';
 FCSR_NAME: 'frcsr' | 'frflags' | 'frrm';
 FSCSR_NAME: 'fscsr' | 'fsflags' | 'fsrm';
@@ -57,12 +60,13 @@ XFF_NAME: 'feq.d' | 'feq.s' | 'flt.d' | 'flt.s' | 'fle.d' | 'fle.s';
 F_LDST_NAME: 'fld' | 'fsd' | 'flw' | 'fsw';
 FFFF_NAME: 'fmadd.d' | 'fmadd.s' | 'fmsub.d' | 'fmsub.s' | 'fnmadd.d' | 'fnmadd.s' | 'fnmsub.d' | 'fnmsub.s';
 
-BRANCH_PSEUDO_NAME: 'bnez' | 'beqz' | 'blez' | 'bgez' | 'bltz' | 'bgtz';
+BRANCH_PSEUDO_ZERO_NAME: 'bnez' | 'beqz' | 'blez' | 'bgez' | 'bltz' | 'bgtz';
+BRANCH_PSEUDO_NAME: 'bgt' | 'bgtu' | 'ble' | 'bleu' ;
 JALR: 'jalr' ;
 
 R_FMT_NAME : 'add' | 'addw' | 'and' | 'div' | 'divu' | 'divuw' | 'divw'  | 'mul' | 'mulh' | 'mulhsu' | 'mulhu' | 'mulw' | 'rem' | 'remu' | 'remuw' | 'remw'  | 'sll' | 'sllw' | 'slt' | 'sltu' | 'sra' | 'sraw' | 'srl' | 'srlw' | 'sub' | 'subw' | 'xor' ;
 I_FMT_NAME : 'addi' | 'addiw' | 'andi' | 'ori' | 'slli' | 'slliw' | 'slti' | 'sltiu' | 'srai' | 'sraiw' | 'srli' | 'srliw' | 'xori' ;
-B_FMT_NAME: 'beq' | 'bge' | 'bgeu' | 'blt' | 'bltu' | 'bne' | 'bgt';
+B_FMT_NAME: 'beq' | 'bge' | 'bgeu' | 'blt' | 'bltu' | 'bne' ;
 U_FMT_NAME: 'auipc' | 'lui' | 'li';
 
 LD_NAME : 'lb' | 'lbu' | 'ld' | 'lh' | 'lhu' | 'lw' | 'lwu' | ('lr.w' | 'lr.d')MO_FLAG?;

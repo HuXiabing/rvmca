@@ -116,6 +116,15 @@ class ProgramListener(ParseTreeListener):
         pass
 
 
+    # Enter a parse tree produced by ProgramParser#inst_bgtle.
+    def enterInst_bgtle(self, ctx:ProgramParser.Inst_bgtleContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_bgtle.
+    def exitInst_bgtle(self, ctx:ProgramParser.Inst_bgtleContext):
+        pass
+
+
     # Enter a parse tree produced by ProgramParser#inst_j.
     def enterInst_j(self, ctx:ProgramParser.Inst_jContext):
         pass
@@ -140,6 +149,15 @@ class ProgramListener(ParseTreeListener):
 
     # Exit a parse tree produced by ProgramParser#inst_mv.
     def exitInst_mv(self, ctx:ProgramParser.Inst_mvContext):
+        pass
+
+
+    # Enter a parse tree produced by ProgramParser#inst_neg.
+    def enterInst_neg(self, ctx:ProgramParser.Inst_negContext):
+        pass
+
+    # Exit a parse tree produced by ProgramParser#inst_neg.
+    def exitInst_neg(self, ctx:ProgramParser.Inst_negContext):
         pass
 
 

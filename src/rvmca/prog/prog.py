@@ -198,11 +198,25 @@ class ProgramParseListener(ProgramListener):
 
     def enterInst_bz(self, ctx: ProgramParser.Inst_bzContext):
         rs1, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
-        inst = BFmtInst(ctx.BRANCH_PSEUDO_NAME().getText(), rs1, 'x0')
+        inst = BFmtInst(ctx.BRANCH_PSEUDO_ZERO_NAME().getText()[:-1], rs1, 'x0')
         if imm is not None:
             inst.imm = int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
+        self.program.insts.append(inst)
+
+    def enterInst_bgtle(self, ctx: ProgramParser.Inst_bgtleContext):
+        rs1, rs2, imm, label = ctx.REG(0).getText(), ctx.REG(1).getText(), ctx.IMM(), ctx.LABEL()
+        inst = BFmtInst(ctx.BRANCH_PSEUDO_NAME().getText(), rs1, rs2)
+        if imm is not None:
+            inst.imm = int(imm.getText())
+        elif label is not None:
+            inst.label = label.getText()
+        self.program.insts.append(inst)
+
+    def enterInst_neg(self, ctx: ProgramParser.Inst_negContext):
+        rd, rs2 = ctx.REG(0).getText(), ctx.REG(1).getText()
+        inst = RFmtInst(ctx.NEG_NAME().getText().replace('neg', 'sub'), rd, 'x0', rs2)
         self.program.insts.append(inst)
 
     def enterInst_mv(self, ctx: ProgramParser.Inst_mvContext):
@@ -240,6 +254,7 @@ class ProgramParseListener(ProgramListener):
 
 
 def parse_program(text):
+    text += '\n'
     lexer = ProgramLexer(InputStream(text))
     stream = CommonTokenStream(lexer)
     parser = ProgramParser(stream)

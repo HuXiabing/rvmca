@@ -735,11 +735,13 @@ class SSAInst:
     build from an Inst
     """
 
-    def __init__(self, inst: Inst, idx: int = -1, rmap=None):
+    def __init__(self, inst: Inst, idx: int = -1):
         self.inst = inst
         self.branch_taken = None
         self.sc_succeed = None  # for sc
-        self.rmap = {} if rmap is None else rmap  # reg -> BitVec
+        # reg -> BitVec
+        self.use_rmap = {}
+        self.def_rmap = {}
         self.idx = idx
 
     @property
@@ -759,18 +761,21 @@ class SSAInst:
             # there is no dst register if sc fails
             return None
         d = self.inst.get_def()
-        return self.rmap[d] if d is not None else None
+        return self.def_rmap[d] if d is not None else None
 
     def get_uses(self):
-        return [self.rmap[u] for u in self.inst.get_uses()]
+        return [self.use_rmap[u] for u in self.inst.get_uses()]
 
     def get_data(self):
         d = self.inst.get_data()
-        return self.rmap[d] if d is not None else None
+        return self.use_rmap[d] if d is not None else None
 
     def get_addr(self):
         a = self.inst.get_addr()
-        return self.rmap[a] if a is not None else None
+        return self.use_rmap[a] if a is not None else None
+
+    def is_ldst(self):
+        return self.inst.type in [IType.Load, IType.Store, IType.Amo]
 
     def verify(self):
         if isinstance(self.inst, BFmtInst):
@@ -778,8 +783,16 @@ class SSAInst:
 
     @property
     def operands(self):
-        return [self.rmap[op] if isinstance(op, Reg) and op in self.rmap else op
-                for op in self.inst.operands]
+        ops = list(self.inst.operands)
+        op = self.inst.get_def()
+        idx = 0
+        if op is not None:
+            ops[idx] = self.def_rmap[op]
+            idx += 1
+        for i in range(idx, len(ops)):
+            if isinstance(ops[i], Reg):
+                ops[i] = self.use_rmap[ops[i]]
+        return ops
 
     def __repr__(self):
         return f'<0x{"{:0>2X}".format(self.inst.pc)}>\t{self.inst.mnemonic(self.operands)}\t'

@@ -26,6 +26,7 @@ from rvmca.prog import *
 from rvmca.utils.file_util import *
 from rvmca.config import *
 
+all_tests = list_files(TESTS_INPUT_PATH / 'coremark-gcc14-O2', '.S')
 
 class TestProg:
 
@@ -41,6 +42,11 @@ class TestProg:
         for file in list_files(directory, '.S'):
             content = read_file(file) + '\n'
             parse_program(content)
+
+    @pytest.mark.parametrize('filepath', all_tests)
+    def test_one_case(self, filepath):
+        content = read_file(filepath)
+        parse_program(content)
 
     def test_fp(self):
         text =  'fabs.d f1, f5\n' \

@@ -43,7 +43,7 @@ def _read_file_to_list_strip(file_path, skip_empty_line=True):
         lines = f.readlines()
         for line in lines:
             if len(line.strip()) == 0:
-                logger.info("skip empty line.")
+                INFO("skip empty line.")
                 continue
             stripped_lines.append(line.strip())
     return stripped_lines
@@ -124,7 +124,7 @@ def get_file_name_from_path(file_path: str):
 def rm_file(file_path):
     if os.path.exists(file_path) and os.path.isfile(file_path):
         os.remove(file_path)
-        logger.info(f'rm file: {file_path}')
+        INFO(f'rm file: {file_path}')
 
 
 def rm_files_in_dir(dir_path):
@@ -132,7 +132,7 @@ def rm_files_in_dir(dir_path):
     if len(str(dir_path)) < MIN_DIR_LEN:
         assert False, "dangerous rm."
 
-    logger.info(f'rm files in dir: {dir_path}')
+    INFO(f'rm files in dir: {dir_path}')
     if os.path.isdir(dir_path):
         for file_name in os.listdir(dir_path):
             file_path = os.path.join(dir_path, file_name)
@@ -141,7 +141,7 @@ def rm_files_in_dir(dir_path):
 
 
 def rm_all_content_in_dir_except(dir_path, except_file_name):
-    logger.info(
+    INFO(
         f"remove all content in {dir_path} except file: {except_file_name}")
 
     # to avoid delete important dir
@@ -191,7 +191,7 @@ def rm_dir(dir_path):
         assert False, "dangerous rm."
 
     if os.path.isdir(dir_path):
-        logger.info(f"rm dir: {dir_path}")
+        INFO(f"rm dir: {dir_path}")
         shutil.rmtree(dir_path)
 
 
@@ -201,7 +201,7 @@ def rm_file_safe_contain(file_path, contain_word):
 
     if os.path.exists(file_path) and os.path.isfile(file_path):
         os.remove(file_path)
-        logger.info(f'rm file: {file_path}')
+        INFO(f'rm file: {file_path}')
 
 
 def rm_dir_safe_contain(dir_path, contain_word):
