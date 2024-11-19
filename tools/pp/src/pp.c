@@ -40,26 +40,19 @@ int read_insns_from_file(FILE* file){
 
 int main(int argc, char *argv[]) {
     // check the number of arguments
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <test_name>\n", argv[0]);
-        fprintf(stderr, "  <test_name>.code and <test_name>.init are required\n", argv[0]);
+    if (argc != 3){
+        fprintf(stderr, "Usage: %s xxx.init xxx.code\n", argv[0]);
+        fprintf(stderr, "  xxx.init and xxx.code are required\n", argv[0]);
 
         return EXIT_FAILURE;
     }
 
     // insert init code to profile.S
     FILE *file;
-    char * test_name = argv[1];
-    char init_filename[100];
-    strcpy(init_filename, "");
-    strcat(init_filename, test_name);
-    strcat(init_filename, ".init");
+    char *init_filename = argv[1];
+    char *test_filename = argv[2];
 
-    char test_filename[100];
-    strcpy(test_filename, "");
-    strcat(test_filename, test_name);
-    strcat(test_filename, ".code");
-    
+
     file = fopen(init_filename, "r");
     if (file == NULL) {
         printf("File %s not found.\n", init_filename);
@@ -124,7 +117,7 @@ int main(int argc, char *argv[]) {
 
     init_fpu();
     long minN = LONG_MAX, min0 = LONG_MAX;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 100; i++){
         run(&minN,&min0);
         printf("[%d]: %ld - %ld\n", i, minN, min0);
     }

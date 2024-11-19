@@ -10,7 +10,7 @@ def run_cmd(cmd):
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
         return result.stdout
     except subprocess.CalledProcessError as e:
-        print(e.stderr)
+        WARNING(e.stderr)
     return None
 
 
