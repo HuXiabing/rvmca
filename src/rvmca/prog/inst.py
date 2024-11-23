@@ -324,7 +324,8 @@ class BFmtInst(Inst):
 
     def mnemonic(self, operands):
         rs1, rs2, imm = operands
-        return f'{self.name} {rs1}, {rs2}, {self.imm}'
+        imm = self.label if imm is None else imm
+        return f'{self.name} {rs1}, {rs2}, {imm}'
 
 
 class LABEL_POS(Enum):

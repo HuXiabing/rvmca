@@ -23,7 +23,10 @@
 """Profiling"""
 
 from typing import List, Tuple
-from rvmca.log import DEBUG, INFO
+
+from angr.state_plugins import SimActionConstraint
+
+from rvmca.log import DEBUG, INFO, WARNING
 from rvmca.trans.block import *
 import math
 
@@ -31,6 +34,7 @@ from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, parse_program, SSA
     RFmtInst
 import copy
 import angr, claripy
+
 from rvmca.config import *
 from rvmca.prog.reg import find_reg_by_name, bitvec_to_reg
 from rvmca.utils.cmd_util import run_cmd
@@ -40,12 +44,14 @@ from rvmca.analysis import RDG
 _available_regs = [
     # TODO: check the available registers
     find_reg_by_name(n)
-    for n in [f't{i}' for i in range(7)] + \
+    for n in [f't{i}' for i in range(6)] + \
              [f'a{i}' for i in [0, 1, 2, 3, 4, 6, 7]] + \
              [f's{i}' for i in range(12)]
 ]
 
 STACK_RANGE = 0x7ff
+TEMP_REG = 't6'
+REG_PREFIX = 'rvmca_reg_'
 
 
 def _legalize_branch(inst: Inst) -> Inst:
@@ -194,15 +200,23 @@ def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
     return prog
 
 
+def add_undef_reg_checking(prog: Program, undefined_regs: List) -> Program:
+    prog = copy.deepcopy(prog)
+    insts = [
+        BFmtInst('blt', reg.name, 'x0', label='fail')
+        for reg in undefined_regs
+    ]
+    prog.insts = insts + prog.insts
+    return prog
+
+
 def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
     """Add address checking for a block"""
 
-    temp = 'gp' if temp_reg is None else temp_reg
+    temp = TEMP_REG if temp_reg is None else temp_reg
     check_block_validity(prog)
 
     prog = copy.deepcopy(prog)
-    # TODO: find a proper label offset
-    fail_offset = 0x700
     insts = []
     for inst in prog.insts:
         if inst.type in [IType.Load, IType.Store, IType.Amo]:
@@ -210,16 +224,16 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
             imm = inst.imm
             insts.append(UFmtInst('li', temp, imm))
             insts.append(RFmtInst('add', temp, str(addr), temp))
-            insts.append(BFmtInst('bge', temp, 'sp', fail_offset))
+            insts.append(BFmtInst('bge', temp, 'sp', label='fail'))
             insts.append(IFmtInst('addi', temp, temp, STACK_RANGE))
-            insts.append(BFmtInst('blt', temp, 'sp', fail_offset))
+            insts.append(BFmtInst('blt', temp, 'sp', label='fail'))
             # check address alignment
             mask = (1 << math.floor(math.log2(inst.width))) - 1
+            # TODO: it is ugly
             insts.append(IFmtInst('addi', temp, temp, -STACK_RANGE))
             insts.append(IFmtInst('andi', temp, temp, mask))
-            insts.append(BFmtInst('bne', temp, 'x0', fail_offset))
+            insts.append(BFmtInst('bne', temp, 'x0', label='fail'))
         insts.append(inst)
-    assert len(insts) * 4 < fail_offset
     prog.insts = insts
     return prog
 
@@ -238,7 +252,21 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     # compile and load binary
     # add address range checking for symbolic execution
-    prog2se = add_addr_range_checking(prog, 'gp')
+    prog2se = add_addr_range_checking(prog, TEMP_REG)
+
+    # collect undefined registers
+    from rvmca.analysis import CFG, path_to_ssa
+    cfg = CFG(prog.insts)
+    ssas = path_to_ssa(cfg.edges)
+    rdg = RDG(ssas)
+    rdg.plot(OUTPUT_PATH / 'fail')
+    # FIXME: we only consider xregs for now
+    regs_undefined = list({r for r in rdg.find_undef_regs()
+                           if r in XREG and r not in regs_defined})
+
+    # add dummy checking for undefined registers to avoid unconstrained symbol
+    prog2se = add_undef_reg_checking(prog2se, list(regs_undefined))
+
     print('\n<New Block with address range checking>:')
     print(prog2se.code)
     compile_block(prog2se, name)
@@ -248,39 +276,25 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     init_state = proj.factory.blank_state(addr=begin_addr,
                                           mode='symbolic',
                                           add_options={
-                                              angr.options.SYMBOLIC_WRITE_ADDRESSES,
-                                              # angr.options.MEMORY_SYMBOLIC_BYTES_MAP,
-                                              # angr.options.CONSTRAINT_TRACKING_IN_SOLVER,
-                                              # angr.options.TRACK_SOLVER_VARIABLES,
-                                              # angr.options.TRACK_REGISTER_ACTIONS,
                                               # angr.options.ZERO_FILL_UNCONSTRAINED_MEMORY,
                                               # angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS,
                                               angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
-                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
+                                              # angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
                                               angr.options.CONSERVATIVE_WRITE_STRATEGY,
                                               angr.options.CONSERVATIVE_READ_STRATEGY,
                                               # angr.options.UNICORN_HANDLE_SYMBOLIC_ADDRESSES
-                                          }
+                                          },
                                           )
-    from rvmca.prog import IFmtInst, UFmtInst
-    init_sp = claripy.BVS('sp', 64)
-    init_state.regs.sp = init_sp
+    from rvmca.prog import UFmtInst
+    init_state.options.discard(angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS)
+    DEBUG(init_state.options.tally())
 
+    # init_state.options.remove(angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS)
     # block = proj.factory.block(begin_addr)
     # INFO("<Block>")
     # for inst in block.capstone.insns:
     #     INFO(f"{inst.address:#x}: {inst.mnemonic} {inst.op_str}")
     # end_addr = block.instruction_addrs[-1]
-
-    # collect undefined registers
-    from rvmca.analysis import CFG, path_to_ssa
-    cfg = CFG(prog.insts)
-    ssas = path_to_ssa(cfg.edges)
-    rdg = RDG(ssas)
-    # rdg.plot(OUTPUT_PATH / 'fail')
-    # FIXME: we only consider xregs for now
-    regs_undefined = {r for r in rdg.find_undef_regs()
-                      if r in XREG and r not in regs_defined}
 
     def find_base_addr(ssa_inst):
         assert ssa_inst.is_ldst()
@@ -306,41 +320,76 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         for reg in find_base_addr(inst):
             base_regs.add(bitvec_to_reg(reg))
 
-    init_state.regs.x0 = 0
+    # zero fill integer registers
+    for i in range(32):
+        setattr(init_state.regs, f'x{i}', claripy.BVV(0, 64))
+
+    init_sp = claripy.BVS(REG_PREFIX + 'sp', 64)
+    init_state.regs.sp = init_sp
+
     # create variables for undefined registers
-    reg_vars = {}
+    reg_to_symbol = {}
     for reg in regs_undefined:
-        if reg in base_regs:
-            offset = claripy.BVS(f'{reg.name}_sp_offset', 64)
-            setattr(init_state.regs, reg.name, init_sp - offset)
-            reg_vars[reg] = offset
-        else:
-            reg_vars[reg] = getattr(init_state.regs, reg.name)
+        var = claripy.BVS(f'{REG_PREFIX + reg.name}', 64)
+        setattr(init_state.regs, reg.name, var)
+        reg_to_symbol[reg] = var
+
+    DEBUG(f'{regs_undefined =}')
+
+    # init_state.add_constraints(init_sp == claripy.BVV(0x7fff0000, 64))
+    init_state.add_constraints(init_state.regs.x0 == 0)
 
     # create a simulation manager
     simgr = proj.factory.simulation_manager(init_state)
 
-    simgr.explore(find=end_addr)
-    assert simgr.found, f'simulation fails at {end_addr:#x}'
-    DEBUG(f'{simgr.found[0].solver.constraints = }')
+    # mapping unconstrained symbol to undefined registers
+    simgr.explore(find=begin_addr + len(regs_undefined) * 4)
+    history_events = simgr.found[0].history.events.hardcopy
+    DEBUG(f'{history_events = }')
+    history_events = [e for e in history_events if isinstance(e, SimActionConstraint)]
+    for i, event in enumerate(history_events):
+        constraint = event.constraint
+        assert constraint.ast.op is 'SGE'
+        reg_symbol = constraint.ast.args[0]
+        if not str(reg_symbol).startswith(f'<BV64 {REG_PREFIX}'):
+            reg = regs_undefined[i]
+            reg_to_symbol[reg] = reg_symbol
+            WARNING(f'unconstrained register: {str(reg_symbol)} for {reg}')
 
-    solver = claripy.Solver()
-    solver.add(simgr.found[0].solver.constraints)
-    # solver.add(addr_constraints)
-    solver.add(init_sp == claripy.BVV(0x7fff0000, 64))
-    solver.add(init_state.regs.x0 == 0)
-    DEBUG(f'{solver.constraints = }')
+    # create a simulation manager
+    simgr = proj.factory.simulation_manager(simgr.found[0])
+    simgr.explore(find=end_addr)
+
+    assert simgr.found, f'simulation fails at {end_addr:#x}'
+    final_state = simgr.found[0]
+
+    DEBUG(f'{final_state.solver.constraints = }')
+    DEBUG(f'{final_state.history.events.hardcopy = }')
+    solver = final_state.solver
+    solver.add(final_state.regs.x0 == 0)
+
     assert solver.satisfiable(), f"[ERROR]: {name} is not satisfiable"
 
-    for k, v in reg_vars.items():
-        val = solver.min(v)
-        reg_name = k.name
-        if k in base_regs:
-            init_code.append(IFmtInst('addi', reg_name, 'sp', -val))
-        else:
-            init_code.append(UFmtInst('li', reg_name, val))
-        solver.add(v == val)
+    solver.add(init_sp & 7 == 0)  # stack pointer alignment
+    # solver.add(final_state.regs.sp == claripy.BVV(0x70a4a7bff690, 64))
 
+    undefined_reg_vars = [reg for reg in regs_undefined if reg not in base_regs]
+    undefined_base_vars = [reg for reg in regs_undefined if reg in base_regs]
+
+    for reg in undefined_reg_vars:
+        symbol = reg_to_symbol[reg]
+        val = solver.min(symbol)
+        init_code.append(UFmtInst('li', reg.name, val))
+        solver.add(symbol == val)
+
+    for reg in undefined_base_vars:
+        symbol = reg_to_symbol[reg]
+        val = solver.min(init_sp - symbol)
+        init_code.append(UFmtInst('li', reg.name, val))
+        init_code.append(RFmtInst('sub', reg.name, 'sp', reg.name))
+        solver.add(init_sp - symbol == val)
+
+    DEBUG(f'{solver.constraints = }')
     return init_code
 
 
@@ -392,7 +441,8 @@ def transform_for_profiling(filepath, output_path=''):
         assemble_code(test_code, test_name)
 
         # run new block with pp
-        result = run_cmd(f"qemu-riscv64 {TOOLS_PATH / 'pp' / 'pp'} {OUTPUT_PATH / test_name}")
+        test_path = OUTPUT_PATH / test_name
+        result = run_cmd(f"qemu-riscv64 {TOOLS_PATH / 'pp' / 'pp'} {test_path}.init {test_path}.code")
 
         if not result:
             run_cmd(f"echo '# init code' > {output_path}.error")
@@ -416,6 +466,6 @@ def transform_for_profiling(filepath, output_path=''):
         rm_file(f"{OUTPUT_PATH / test_name}.S")
         rm_file(f"{OUTPUT_PATH / test_name}.exe")
         if not failed:
-            print(f'Successfully!\n')
+            INFO(f'Successfully!\n')
         else:
             raise AssertionError(error_msg)

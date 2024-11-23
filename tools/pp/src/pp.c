@@ -2,7 +2,7 @@
 #include <limits.h>
 
 __attribute__((noinline)) void run(long *min1, long *min2) {
-    long result1 = 0, result2 = 0;
+    unsigned long result1 = 0, result2 = 0;
     
     result1 = profileN(); 
     result2 = profile0();
@@ -116,7 +116,7 @@ int main(int argc, char *argv[]) {
     ENABLE_VPU
 
     init_fpu();
-    long minN = LONG_MAX, min0 = LONG_MAX;
+    unsigned long minN = LONG_MAX, min0 = LONG_MAX;
     for (int i = 0; i < 100; i++){
         run(&minN,&min0);
         printf("[%d]: %ld - %ld\n", i, minN, min0);

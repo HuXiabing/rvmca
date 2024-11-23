@@ -15,3 +15,5 @@ rvmca_block_begin:
 #CODE#
 rvmca_block_end:
     ret
+fail:
+    j .
