@@ -776,7 +776,13 @@ class SSAInst:
         return self.use_rmap[a] if a is not None else None
 
     def is_ldst(self):
-        return self.inst.type in [IType.Load, IType.Store, IType.Amo]
+        return self.is_load() or self.is_store()
+
+    def is_load(self):
+        return self.inst.type in [IType.Load, IType.Amo]
+
+    def is_store(self):
+        return self.inst.type in [IType.Store, IType.Amo]
 
     def verify(self):
         if isinstance(self.inst, BFmtInst):

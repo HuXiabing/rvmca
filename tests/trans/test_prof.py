@@ -22,7 +22,7 @@
 """Test for RISC-V Program Parser"""
 import pytest
 
-from rvmca.analysis import CFG, path_to_ssa, DDG, RDG
+from rvmca.analysis import CFG, path_to_ssa, DDG, RVFG
 from rvmca.trans.prof import *
 from rvmca.utils.file_util import *
 from rvmca.config import *
@@ -51,7 +51,7 @@ class TestProf:
             transform_for_profiling(file)
 
     def test_fail(self):
-        file = TESTS_INPUT_PATH / 'manual' / '8.S'
+        file = TESTS_INPUT_PATH / 'manual' / '5.S'
         # file = TESTS_INPUT_PATH / 'coremark-gcc14-O2' / 'block-28.S'
         transform_for_profiling(file)
 
@@ -69,7 +69,7 @@ class TestProf:
         print()
         print('\n'.join([str(ssa) for ssa in ssas]))
 
-    def test_ddg_rdg(self):
+    def test_ddg_rvfg(self):
         filepath = INPUT_PATH / 'test.S'
         content = read_file(filepath) + '\n'
         prog = parse_program(content)
@@ -86,6 +86,6 @@ class TestProf:
         ddg = DDG(ssas)
         ddg.plot(OUTPUT_PATH / 'test.ddg')
 
-        rdg = RDG(ssas)
-        rdg.plot(OUTPUT_PATH / 'test.rdg')
+        rvfg = RVFG(ssas)
+        rvfg.plot(OUTPUT_PATH / 'test.rvfg')
 

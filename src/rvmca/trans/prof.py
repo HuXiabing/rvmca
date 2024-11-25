@@ -24,14 +24,15 @@
 
 from typing import List, Tuple
 
-from angr.state_plugins import SimActionConstraint
+from angr.state_plugins import SimActionConstraint, SimEvent
+from z3 import BitVecRef
 
 from rvmca.log import DEBUG, INFO, WARNING
 from rvmca.trans.block import *
 import math
 
 from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, parse_program, SSAInst, IFmtInst, BFmtInst, UFmtInst, \
-    RFmtInst
+    RFmtInst, StoreInst
 import copy
 import angr, claripy
 
@@ -39,7 +40,7 @@ from rvmca.config import *
 from rvmca.prog.reg import find_reg_by_name, bitvec_to_reg
 from rvmca.utils.cmd_util import run_cmd
 from rvmca.utils.file_util import rm_file, read_file, write_to_file
-from rvmca.analysis import RDG
+from rvmca.analysis import RVFG
 
 _available_regs = [
     # TODO: check the available registers
@@ -51,6 +52,7 @@ _available_regs = [
 
 STACK_RANGE = 0x7ff
 TEMP_REG = 't6'
+TEMP_REG2 = 's11'
 REG_PREFIX = 'rvmca_reg_'
 
 
@@ -258,10 +260,10 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     from rvmca.analysis import CFG, path_to_ssa
     cfg = CFG(prog.insts)
     ssas = path_to_ssa(cfg.edges)
-    rdg = RDG(ssas)
-    rdg.plot(OUTPUT_PATH / 'fail')
+    rvfg = RVFG(ssas)
+    rvfg.plot(OUTPUT_PATH / 'fail')
     # FIXME: we only consider xregs for now
-    regs_undefined = list({r for r in rdg.find_undef_regs()
+    regs_undefined = list({r for r in rvfg.find_undef_regs()
                            if r in XREG and r not in regs_defined})
 
     # add dummy checking for undefined registers to avoid unconstrained symbol
@@ -276,13 +278,10 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     init_state = proj.factory.blank_state(addr=begin_addr,
                                           mode='symbolic',
                                           add_options={
-                                              # angr.options.ZERO_FILL_UNCONSTRAINED_MEMORY,
-                                              # angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS,
                                               angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
-                                              # angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
+                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
                                               angr.options.CONSERVATIVE_WRITE_STRATEGY,
                                               angr.options.CONSERVATIVE_READ_STRATEGY,
-                                              # angr.options.UNICORN_HANDLE_SYMBOLIC_ADDRESSES
                                           },
                                           )
     from rvmca.prog import UFmtInst
@@ -299,26 +298,29 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     def find_base_addr(ssa_inst):
         assert ssa_inst.is_ldst()
         addr_reg = ssa_inst.get_addr()
-        paths = rdg.find_paths(rdg.start, rdg.find_node_by_value(addr_reg))
-        clean_path = []
-        for path in paths:
-            has_taint = False
-            for edge in path:
-                if not isinstance(edge.attr, SSAInst):
-                    continue
-                if edge.attr.name not in ['add', 'addi', 'addw', 'addiw']:
-                    has_taint = True
-                    break
-            if not has_taint:
-                clean_path.append(path)
-        assert len(clean_path) >= 1
-        return [p[0].tgt for p in clean_path]
+        tgt_node = rvfg.find_node_by_value(addr_reg)
+        clean_insts = ['add', 'addi', 'addw', 'addiw']
+        paths = rvfg.find_clean_paths(rvfg.undef, tgt_node, clean_insts)
+        if len(paths) == 0:
+            clean_insts.append('ld')
+            paths = rvfg.find_clean_paths(rvfg.mem, tgt_node, clean_insts)
+            assert len(paths) > 0
+            return [p[0].attr.inst for p in paths]
+        else:
+            return [p[0].tgt.value for p in paths]
 
     # map ssa inst to its addr base reg
-    base_regs = set()
+    undef_base_regs = set()
+    mem_base_insts = set()
     for inst in [i for i in ssas if i.is_ldst()]:
-        for reg in find_base_addr(inst):
-            base_regs.add(bitvec_to_reg(reg))
+        for r in find_base_addr(inst):
+            if isinstance(r, BitVecRef):
+                undef_base_regs.add(bitvec_to_reg(r))
+            elif isinstance(r, Inst):
+                for i in prog2se.insts:
+                    if i.pc == r.pc:
+                        mem_base_insts.add(i)
+                        break
 
     # zero fill integer registers
     for i in range(32):
@@ -329,10 +331,10 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     # create variables for undefined registers
     reg_to_symbol = {}
-    for reg in regs_undefined:
-        var = claripy.BVS(f'{REG_PREFIX + reg.name}', 64)
-        setattr(init_state.regs, reg.name, var)
-        reg_to_symbol[reg] = var
+    for r in regs_undefined:
+        var = claripy.BVS(f'{REG_PREFIX + r.name}', 64)
+        setattr(init_state.regs, r.name, var)
+        reg_to_symbol[r] = var
 
     DEBUG(f'{regs_undefined =}')
 
@@ -352,9 +354,30 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         assert constraint.ast.op is 'SGE'
         reg_symbol = constraint.ast.args[0]
         if not str(reg_symbol).startswith(f'<BV64 {REG_PREFIX}'):
-            reg = regs_undefined[i]
-            reg_to_symbol[reg] = reg_symbol
-            WARNING(f'unconstrained register: {str(reg_symbol)} for {reg}')
+            r = regs_undefined[i]
+            reg_to_symbol[r] = reg_symbol
+            WARNING(f'unconstrained register: {str(reg_symbol)} for {r}')
+
+    # capture unconstrained load value
+    mem_base_insts = list(mem_base_insts)
+    mem_base_insts.sort(key=lambda i: i.pc)
+    mem_base_map = {}
+    for inst in mem_base_insts:
+        target_addr = begin_addr + prog2se.insts.index(inst) * 4 + 4
+        assert simgr.found[0].ip.concrete_value < target_addr
+        simgr = proj.factory.simulation_manager(simgr.found[0])
+        simgr.explore(find=target_addr)
+        assert simgr.found
+        events = list(simgr.found[0].history.events.hardcopy)
+        events = [e for e in events if not isinstance(e, SimActionConstraint)]
+        events.reverse()
+        for event in events:
+            if event.ins_addr == target_addr - 4:
+                name = event.objects['name']
+                rd_symbol = getattr(simgr.found[0].regs, str(inst.rd))
+                addr_symbol = getattr(simgr.found[0].regs, str(inst.rs1)) + inst.imm
+                mem_base_map[name] = (rd_symbol, addr_symbol)
+                DEBUG(f'memory unconstrained symbol {name}: {rd_symbol = } {addr_symbol = }')
 
     # create a simulation manager
     simgr = proj.factory.simulation_manager(simgr.found[0])
@@ -373,21 +396,33 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     solver.add(init_sp & 7 == 0)  # stack pointer alignment
     # solver.add(final_state.regs.sp == claripy.BVV(0x70a4a7bff690, 64))
 
-    undefined_reg_vars = [reg for reg in regs_undefined if reg not in base_regs]
-    undefined_base_vars = [reg for reg in regs_undefined if reg in base_regs]
+    undefined_reg_vars = [reg for reg in regs_undefined if reg not in undef_base_regs]
+    undefined_base_vars = [reg for reg in regs_undefined if reg in undef_base_regs]
 
-    for reg in undefined_reg_vars:
-        symbol = reg_to_symbol[reg]
+    for r in undefined_reg_vars:
+        symbol = reg_to_symbol[r]
         val = solver.min(symbol)
-        init_code.append(UFmtInst('li', reg.name, val))
+        init_code.append(UFmtInst('li', r.name, val))
         solver.add(symbol == val)
 
-    for reg in undefined_base_vars:
-        symbol = reg_to_symbol[reg]
+    for r in undefined_base_vars:
+        symbol = reg_to_symbol[r]
         val = solver.min(init_sp - symbol)
-        init_code.append(UFmtInst('li', reg.name, val))
-        init_code.append(RFmtInst('sub', reg.name, 'sp', reg.name))
+        init_code.append(UFmtInst('li', r.name, val))
+        init_code.append(RFmtInst('sub', r.name, 'sp', r.name))
         solver.add(init_sp - symbol == val)
+
+    for rd_symbol, addr_symbol in mem_base_map.values():
+        val = solver.min(init_sp - rd_symbol)
+        solver.add(init_sp - rd_symbol == val)
+        init_code.append(UFmtInst('li', TEMP_REG, val))
+        init_code.append(RFmtInst('sub', TEMP_REG, 'sp', TEMP_REG))
+
+        addr = solver.min(init_sp - addr_symbol)
+        solver.add(init_sp - rd_symbol == addr)
+        init_code.append(UFmtInst('li', TEMP_REG2, addr))
+        init_code.append(RFmtInst('sub', TEMP_REG2, 'sp', TEMP_REG2))
+        init_code.append(StoreInst('sd', TEMP_REG, TEMP_REG2, 0))
 
     DEBUG(f'{solver.constraints = }')
     return init_code

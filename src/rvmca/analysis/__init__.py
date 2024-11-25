@@ -22,4 +22,4 @@
 
 from rvmca.analysis.cfg import CFG, path_to_ssa, cfg_to_ssa
 from rvmca.analysis.ddg import DDG
-from rvmca.analysis.rdg import RDG
+from rvmca.analysis.rvfg import RVFG

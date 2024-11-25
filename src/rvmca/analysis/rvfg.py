@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Register Dependency Graph (RDG)"""
+"""Register Value Flow Graph (RVFG)"""
 
 import time
 
@@ -32,8 +32,8 @@ from typing import List, Set
 from rvmca.prog import SSAInst, find_reg_by_name, Reg
 
 
-class RDGNode(BaseNode):
-    """The RDG node.
+class RVFGNode(BaseNode):
+    """The RVFG node.
 
     Parameters
     ----------
@@ -68,39 +68,39 @@ class RDGNode(BaseNode):
         return self.value
 
 
-class RDGEdge(BaseEdge):
-    """The RDG edge.
+class RVFGEdge(BaseEdge):
+    """The RVFG edge.
 
     Parameters
     ----------
-    src: RDGNode
+    src: RVFGNode
         The source node of the edge.
-    tgt: RDGNode
+    tgt: RVFGNode
         The target node of the edge.
     attr: String
         The attribute of the edge.
     """
 
-    def __init__(self, src: RDGNode, tgt: RDGNode, attr: str = ""):
+    def __init__(self, src: RVFGNode, tgt: RVFGNode, attr: str = ""):
         super().__init__(src, tgt, attr)
 
 
-class RDG(BaseGraph):
-    """The register dependency graph (RDG).
+class RVFG(BaseGraph):
+    """The register value flow graph (RVFG).
 
     Parameters
     ----------
     inputs: list
-        A list of RDG node values.
+        A list of RVFG node values.
     name: str, optional
-        The name of the rdg. The default is a time stamp.
+        The name of the rvfg. The default is a time stamp.
 
     Attributes
     ----------
-    start: RDGNode
-        The start node of the rdg.
-    end: RDGNode
-        The end node of the rdg.
+    start: RVFGNode
+        The start node of the RVFG.
+    end: RVFGNode
+        The end node of the RVFG.
     nodes: list
         The ddg nodes.
     edges: list
@@ -110,19 +110,23 @@ class RDG(BaseGraph):
 
     def __init__(self, inputs: List[SSAInst], name: str = None):
         super().__init__(inputs, name)
-        self.start, self.end = RDGNode(label='start'), RDGNode(label='end')
+        self.start, self.end = RVFGNode(label='start'), RVFGNode(label='end')
         self.nodes.extend([self.start, self.end])
+
+        self.undef, self.mem = RVFGNode(label='undef'), RVFGNode(label='mem')
+        self.nodes.extend([self.undef, self.mem])
+
         self._construct(inputs)
 
         if self.name is None:
-            self.name = f'{time.strftime("%Y-%m-%d")}_{RDG.idx}'
-            RDG.idx += 1
+            self.name = f'{time.strftime("%Y-%m-%d")}_{RVFG.idx}'
+            RVFG.idx += 1
 
     def _construct_edge(self, src, tgt, attr):
-        return RDGEdge(src, tgt, attr)
+        return RVFGEdge(src, tgt, attr)
 
     def _construct(self, inputs: List[SSAInst]):
-        """Construct the RDG."""
+        """Construct the RVFG."""
         reg_set = set()
         for inst in inputs:
             def_reg = inst.get_def()
@@ -132,8 +136,8 @@ class RDG(BaseGraph):
             for reg in use_regs:
                 reg_set.add(reg)
 
-        nodes = [RDGNode(value=v) for v in reg_set]
-        assert nodes, 'empty RDG'
+        nodes = [RVFGNode(value=v) for v in reg_set if not str(v).startswith('x0_')]
+        assert nodes, 'empty RVFG'
 
         def find_node_by_reg(r):
             for n in nodes:
@@ -144,8 +148,13 @@ class RDG(BaseGraph):
 
         for inst in inputs:
             def_reg = inst.get_def()
-            use_regs = inst.get_uses()
+            if str(def_reg).startswith('x0_'):
+                continue
+            use_regs = [reg for reg in inst.get_uses() if not str(reg).startswith('x0_')]
             tgt = find_node_by_reg(def_reg) if def_reg is not None else self.end
+            if inst.is_load():
+                self.add_edge(self.mem, tgt, inst)
+                continue
             for reg in use_regs:
                 src = find_node_by_reg(reg)
                 # prevent cycles in register dependencies
@@ -155,12 +164,34 @@ class RDG(BaseGraph):
                 self.add_edge(src, tgt, inst)
         for node in nodes:
             if len(node.preds) == 0:
-                self.add_edge(self.start, node)
+                if node is not self.mem:
+                    self.add_edge(self.undef, node)
             if len(node.succs) == 0:
                 self.add_edge(node, self.end)
+
+        self.add_edge(self.start, self.mem)
+        self.add_edge(self.start, self.undef)
 
         self.nodes.extend(nodes)
 
     def find_undef_regs(self) -> Set[Reg]:
         from rvmca.prog.reg import bitvec_to_reg
-        return {bitvec_to_reg(n.value) for n in self.start.succs}
+        return {bitvec_to_reg(n.value) for n in self.undef.succs}
+
+    def find_clean_paths(self, start, end, clean_edges):
+        paths = self.find_paths(start, end)
+        clean_path = []
+
+        for path in paths:
+            has_taint = False
+            for edge in path:
+                if not isinstance(edge.attr, SSAInst):
+                    continue
+                inst_name = edge.attr.name
+                if inst_name not in clean_edges:
+                    has_taint = True
+                    break
+
+            if not has_taint:
+                clean_path.append(path)
+        return clean_path
