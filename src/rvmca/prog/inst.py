@@ -181,7 +181,10 @@ class UFmtInst(Inst):
 
     def mnemonic(self, operands):
         rd, imm = operands
-        return f'{self.name} {rd}, {hex(imm)}'
+        if self.name == 'lui':
+            # TODO: handle negative lui imm operand
+            imm = abs(imm)
+        return f'{self.name} {rd}, {hex(abs(imm))}'
 
 
 class AmoInst(Inst):

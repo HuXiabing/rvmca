@@ -51,8 +51,8 @@ class TestProf:
             transform_for_profiling(file)
 
     def test_fail(self):
-        file = TESTS_INPUT_PATH / 'manual' / '5.S'
-        # file = TESTS_INPUT_PATH / 'coremark-gcc14-O2' / 'block-28.S'
+        # file = TESTS_INPUT_PATH / 'manual' / '5.S'
+        file = TESTS_INPUT_PATH / 'coremark-gcc14-O2' / 'block-41.S'
         transform_for_profiling(file)
 
     def test_cfg(self):

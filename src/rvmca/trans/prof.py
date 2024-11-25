@@ -268,6 +268,10 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     # add dummy checking for undefined registers to avoid unconstrained symbol
     prog2se = add_undef_reg_checking(prog2se, list(regs_undefined))
+    last_inst = prog2se.insts[-1]
+    if isinstance(last_inst, BFmtInst):
+        last_inst.label = 'rvmca_block_end'
+        last_inst.imm = None
 
     print('\n<New Block with address range checking>:')
     print(prog2se.code)

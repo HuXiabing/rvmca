@@ -16,4 +16,4 @@ rvmca_block_begin:
 rvmca_block_end:
     ret
 fail:
-    j .
+    ret
