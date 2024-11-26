@@ -261,7 +261,7 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     cfg = CFG(prog.insts)
     ssas = path_to_ssa(cfg.edges)
     rvfg = RVFG(ssas)
-    rvfg.plot(OUTPUT_PATH / 'fail')
+    # rvfg.plot(OUTPUT_PATH / 'fail')
     # FIXME: we only consider xregs for now
     regs_undefined = list({r for r in rvfg.find_undef_regs()
                            if r in XREG and r not in regs_defined})
@@ -442,7 +442,10 @@ def transform_for_profiling(filepath, output_path=''):
         import re
         pattern = r'^\s*[0-9a-f]+:\s+(.*)'
         # pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
-        machine_code = '\n'.join(re.findall(pattern, output, re.MULTILINE))
+        codes = re.findall(pattern, output, re.MULTILINE)
+        if codes[-1].startswith('0000006f'):
+            codes = codes[:-1]
+        machine_code = '\n'.join(codes)
         write_to_file(f'{OUTPUT_PATH / name}.{suffix}', machine_code, append=False)
         return machine_code
 

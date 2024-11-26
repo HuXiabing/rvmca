@@ -27,7 +27,7 @@ from rvmca.prog import IType, Program, parse_program
 from rvmca.utils.file_util import read_file, write_to_file
 
 
-def random_scheduling(program: Program, limit=1000):
+def random_scheduling(program: Program, limit=1000, plot=False):
     """random schedule insts via topological sorting (returns a generator)"""
     check_block_validity(program)
 
@@ -75,6 +75,14 @@ def random_scheduling(program: Program, limit=1000):
                 if inst2.get_def() is rs_1:
                     dag[inst1].add(inst2)
                     break
+
+    if plot:
+        from rvmca.utils.plot import AGraphNode, AGraphEdge, plot_graph
+        nodes = [AGraphNode(str(k)) for k in dag.keys()]
+        edges = []
+        for k, v in dag.items():
+            edges.extend([AGraphEdge(str(k), str(n)) for n in v])
+        plot_graph('ddg', nodes, edges)
 
     finished = False
 
