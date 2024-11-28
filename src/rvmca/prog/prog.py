@@ -31,6 +31,16 @@ from rvmca.prog.parser.ProgramListener import ProgramListener
 from rvmca.prog.parser.ProgramParser import ProgramParser
 
 
+def _auto_int(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return int(value, 16)
+        except ValueError:
+            raise ValueError(f"The {value} cannot be converted to an integer.")
+
+
 class Program:
     def __init__(self, insts=None):
         self.insts = [] if insts is None else insts
@@ -64,7 +74,7 @@ class ProgramParseListener(ProgramListener):
         imm, label = ctx.IMM(), ctx.LABEL()
         inst = JFmtInst('jal', 'x0')
         if imm is not None:
-            inst.imm = int(imm.getText())
+            inst.imm = _auto_int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
         self.program.insts.append(inst)
@@ -126,7 +136,7 @@ class ProgramParseListener(ProgramListener):
 
     def enterInst_f_ldst(self, ctx: ProgramParser.Inst_f_ldstContext):
         name = ctx.F_LDST_NAME().getText()
-        rd, imm, rs1 = ctx.FREG().getText(), int(ctx.IMM().getText()), ctx.REG().getText()
+        rd, imm, rs1 = ctx.FREG().getText(), _auto_int(ctx.IMM().getText()), ctx.REG().getText()
         if name.startswith('fl'):
             inst = LoadInst(name, rd, rs1, imm)
         elif name.startswith('fs'):
@@ -160,12 +170,12 @@ class ProgramParseListener(ProgramListener):
         self.program.insts.append(FenceTsoInst())
 
     def enterIfmt(self, ctx: ProgramParser.IfmtContext):
-        rd, rs1, imm = ctx.REG(0).getText(), ctx.REG(1).getText(), int(ctx.IMM().getText())
+        rd, rs1, imm = ctx.REG(0).getText(), ctx.REG(1).getText(), _auto_int(ctx.IMM().getText())
         inst = IFmtInst(ctx.I_FMT_NAME().getText(), rd, rs1, imm)
         self.program.insts.append(inst)
 
     def enterMfmt(self, ctx: ProgramParser.MfmtContext):
-        rd, rs1, imm = ctx.REG(0).getText(), ctx.REG(1).getText(), int(ctx.IMM().getText())
+        rd, rs1, imm = ctx.REG(0).getText(), ctx.REG(1).getText(), _auto_int(ctx.IMM().getText())
         ld_name, sd_name, jalr = ctx.LD_NAME(), ctx.SD_NAME(), ctx.JALR()
         inst = None
         if ld_name is not None:
@@ -182,7 +192,7 @@ class ProgramParseListener(ProgramListener):
         self.program.insts.append(inst)
 
     def enterUfmt(self, ctx: ProgramParser.UfmtContext):
-        ufmt_name, reg, imm = ctx.U_FMT_NAME().getText(), ctx.REG().getText(), int(ctx.IMM().getText())
+        ufmt_name, reg, imm = ctx.U_FMT_NAME().getText(), ctx.REG().getText(), _auto_int(ctx.IMM().getText())
         inst = UFmtInst(ufmt_name, reg, imm)
         assert inst is not None, f"[ERROR] parser: unknown UFmt instruction"
         self.program.insts.append(inst)
@@ -191,7 +201,7 @@ class ProgramParseListener(ProgramListener):
         rs1, rs2, imm, label = ctx.REG(0).getText(), ctx.REG(1).getText(), ctx.IMM(), ctx.LABEL()
         inst = BFmtInst(ctx.B_FMT_NAME().getText(), rs1, rs2)
         if imm is not None:
-            inst.imm = int(imm.getText())
+            inst.imm = _auto_int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
         self.program.insts.append(inst)
@@ -200,7 +210,7 @@ class ProgramParseListener(ProgramListener):
         rs1, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
         inst = BFmtInst(ctx.BRANCH_PSEUDO_ZERO_NAME().getText()[:-1], rs1, 'x0')
         if imm is not None:
-            inst.imm = int(imm.getText())
+            inst.imm = _auto_int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
         self.program.insts.append(inst)
@@ -209,7 +219,7 @@ class ProgramParseListener(ProgramListener):
         rs1, rs2, imm, label = ctx.REG(0).getText(), ctx.REG(1).getText(), ctx.IMM(), ctx.LABEL()
         inst = BFmtInst(ctx.BRANCH_PSEUDO_NAME().getText(), rs1, rs2)
         if imm is not None:
-            inst.imm = int(imm.getText())
+            inst.imm = _auto_int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
         self.program.insts.append(inst)
@@ -227,7 +237,7 @@ class ProgramParseListener(ProgramListener):
         rd, imm, label = ctx.REG().getText(), ctx.IMM(), ctx.LABEL()
         inst = JFmtInst('jal', rd)
         if imm is not None:
-            inst.imm = int(imm.getText())
+            inst.imm = _auto_int(imm.getText())
         elif label is not None:
             inst.label = label.getText()
         self.program.insts.append(inst)

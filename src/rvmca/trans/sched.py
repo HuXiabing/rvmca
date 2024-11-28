@@ -133,6 +133,7 @@ def random_scheduling(program: Program, limit=1000, plot=False):
 def transform_for_random_scheduling(filepath, output_path='', limit=1000):
     # read file
     print(f'transform [{filepath}]')
+    filepath = str(filepath)
     test_name = filepath.split('/')[-1].replace('.S', '')
     content = read_file(filepath) + '\n'
 
