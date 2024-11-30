@@ -37,6 +37,7 @@ profileN:
 	sd s9, 72(sp)
 	sd s10, 80(sp)
 	sd s11, 88(sp)
+	addi sp, sp, -0x400
 profile_insn_init:
 	.rept MAX_INSN
 	nop
@@ -52,6 +53,7 @@ profile_insn_start:
 	.endr
 	fence
 	sub	a0,a0,a5
+	addi sp, sp, 0x400
 	ld s0, 0(sp)
 	ld s1, 8(sp)
 	ld s2, 16(sp)

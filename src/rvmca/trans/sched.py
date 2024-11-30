@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 """Instruction Scheduling"""
+from rvmca.log import INFO
 from rvmca.trans.block import *
 
 from rvmca.prog import IType, Program, parse_program
@@ -132,7 +133,7 @@ def random_scheduling(program: Program, limit=1000, plot=False):
 
 def transform_for_random_scheduling(filepath, output_path='', limit=1000):
     # read file
-    print(f'transform [{filepath}]')
+    INFO(f'transform [{filepath}]')
     filepath = str(filepath)
     test_name = filepath.split('/')[-1].replace('.S', '')
     content = read_file(filepath) + '\n'
@@ -140,8 +141,7 @@ def transform_for_random_scheduling(filepath, output_path='', limit=1000):
     if output_path == '':
         output_path = f"{OUTPUT_PATH / test_name}"
 
-    print('<Block>:')
-    print(content)
+    INFO(f'<Block>:\n{content}')
     prog = parse_program(content)
     i = 0
     for new_prog in random_scheduling(prog, limit):

@@ -224,14 +224,20 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
         if inst.type in [IType.Load, IType.Store, IType.Amo]:
             addr = inst.get_addr()
             imm = inst.imm
+            # temp = base + offset
             insts.append(UFmtInst('li', temp, imm))
             insts.append(RFmtInst('add', temp, str(addr), temp))
+            # temp < sp
             insts.append(BFmtInst('bge', temp, 'sp', label='fail'))
+            # temp >= sp - STACK_RANGE
             insts.append(IFmtInst('addi', temp, temp, STACK_RANGE))
             insts.append(BFmtInst('blt', temp, 'sp', label='fail'))
+            if inst.width == 1:
+                continue
             # check address alignment
             mask = (1 << math.floor(math.log2(inst.width))) - 1
             # TODO: it is ugly
+            # temp & mask == 0
             insts.append(IFmtInst('addi', temp, temp, -STACK_RANGE))
             insts.append(IFmtInst('andi', temp, temp, mask))
             insts.append(BFmtInst('bne', temp, 'x0', label='fail'))
@@ -273,8 +279,8 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         last_inst.label = 'rvmca_block_end'
         last_inst.imm = None
 
-    print('\n<New Block with address range checking>:')
-    print(prog2se.code)
+    INFO('\n<New Block with address range checking>:')
+    INFO(prog2se.code)
     compile_block(prog2se, name)
     proj = angr.Project(f'{OUTPUT_PATH / name}.exe', auto_load_libs=False)
     begin_addr = proj.loader.main_object.get_symbol('rvmca_block_begin').rebased_addr
@@ -314,16 +320,18 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
             return [p[0].tgt.value for p in paths]
 
     # map ssa inst to its addr base reg
-    undef_base_regs = set()
-    mem_base_insts = set()
+    undef_base_regs = []
+    mem_base_insts = []
     for inst in [i for i in ssas if i.is_ldst()]:
         for r in find_base_addr(inst):
             if isinstance(r, BitVecRef):
-                undef_base_regs.add(bitvec_to_reg(r))
+                reg = bitvec_to_reg(r)
+                if reg not in undef_base_regs:
+                    undef_base_regs.append(reg)
             elif isinstance(r, Inst):
                 for i in prog2se.insts:
                     if i.pc == r.pc:
-                        mem_base_insts.add(i)
+                        mem_base_insts.append(i)
                         break
 
     # zero fill integer registers
@@ -367,21 +375,37 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     mem_base_insts.sort(key=lambda i: i.pc)
     mem_base_map = {}
     for inst in mem_base_insts:
-        target_addr = begin_addr + prog2se.insts.index(inst) * 4 + 4
-        assert simgr.found[0].ip.concrete_value < target_addr
+        target_addr = begin_addr + prog2se.insts.index(inst) * 4
+        pc = simgr.found[0].ip.concrete_value
+        assert pc <= target_addr
+        if pc < target_addr:
+            simgr = proj.factory.simulation_manager(simgr.found[0])
+            simgr.explore(find=target_addr)
+            assert simgr.found
+        # when rd == rs1 in a load instruction, the state of rs1 will be overwritten
+        # we get the state of rs1 before the execution of the load inst
+        base_symbol = getattr(simgr.found[0].regs, str(inst.rs1))
+        # check if it is unconstrained register
+        if base_symbol.op == 'BVS' and base_symbol.args[0].startswith(REG_PREFIX):
+            if inst.rs1 in reg_to_symbol.keys():
+                base_symbol = reg_to_symbol[inst.rs1]
+
+        addr_symbol = base_symbol + inst.imm
+
+        target_addr += 4
         simgr = proj.factory.simulation_manager(simgr.found[0])
         simgr.explore(find=target_addr)
         assert simgr.found
+
         events = list(simgr.found[0].history.events.hardcopy)
         events = [e for e in events if not isinstance(e, SimActionConstraint)]
         events.reverse()
         for event in events:
             if event.ins_addr == target_addr - 4:
-                name = event.objects['name']
                 rd_symbol = getattr(simgr.found[0].regs, str(inst.rd))
-                addr_symbol = getattr(simgr.found[0].regs, str(inst.rs1)) + inst.imm
-                mem_base_map[name] = (rd_symbol, addr_symbol)
+                mem_base_map[inst] = (rd_symbol, addr_symbol)
                 DEBUG(f'memory unconstrained symbol {name}: {rd_symbol = } {addr_symbol = }')
+                break
 
     # create a simulation manager
     simgr = proj.factory.simulation_manager(simgr.found[0])
@@ -418,17 +442,18 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     for rd_symbol, addr_symbol in mem_base_map.values():
         val = solver.min(init_sp - rd_symbol)
+        assert val > 0
         solver.add(init_sp - rd_symbol == val)
         init_code.append(UFmtInst('li', TEMP_REG, val))
         init_code.append(RFmtInst('sub', TEMP_REG, 'sp', TEMP_REG))
 
         addr = solver.min(init_sp - addr_symbol)
-        solver.add(init_sp - rd_symbol == addr)
+        assert addr > 0
+        solver.add(init_sp - addr_symbol == addr)
         init_code.append(UFmtInst('li', TEMP_REG2, addr))
         init_code.append(RFmtInst('sub', TEMP_REG2, 'sp', TEMP_REG2))
         init_code.append(StoreInst('sd', TEMP_REG, TEMP_REG2, 0))
 
-    DEBUG(f'{solver.constraints = }')
     return init_code
 
 
@@ -450,7 +475,7 @@ def transform_for_profiling(filepath, output_path=''):
         return machine_code
 
     # read file
-    print(f'transform [{filepath}]')
+    INFO(f'transform [{filepath}]')
     filepath = str(filepath)
     test_name = filepath.split('/')[-1].replace('.S', '')
     content = read_file(filepath) + '\n'
@@ -462,22 +487,20 @@ def transform_for_profiling(filepath, output_path=''):
 
     try:
         # transform block
-        print('<Block>:')
-        print(content)
+        INFO(f'<Block>:\n{content}')
         prog = parse_program(content)
         # prog = zero_imm_for_block(prog)
         prog = legalize_jump_and_branch(prog)
         prog = remap_regs_for_block(prog)
-        print('<New Block>:')
-        print(prog.code)
+        INFO(f'<New Block>:\n{prog.code}')
         init_insts = init_states_for_block(prog, name=test_name)
         init_code = '\n'.join([inst.code for inst in init_insts])
         test_code = '\n'.join([inst.code for inst in prog.insts])
-        print('\n<New Block with init code>:')
-        print('# init code')
-        print(init_code)
-        print('# test code')
-        print(test_code)
+        INFO('\n<New Block with init code>:')
+        INFO('# init code')
+        INFO(init_code)
+        INFO('# test code')
+        INFO(test_code)
 
         assemble_code(init_code, test_name, suffix='init')
         assemble_code(test_code, test_name)
