@@ -440,19 +440,30 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         init_code.append(RFmtInst('sub', r.name, 'sp', r.name))
         solver.add(init_sp - symbol == val)
 
-    for rd_symbol, addr_symbol in mem_base_map.values():
-        val = solver.min(init_sp - rd_symbol)
-        assert val > 0
-        solver.add(init_sp - rd_symbol == val)
-        init_code.append(UFmtInst('li', TEMP_REG, val))
-        init_code.append(RFmtInst('sub', TEMP_REG, 'sp', TEMP_REG))
+    mem_val_map = {}
 
+    for rd_symbol, addr_symbol in mem_base_map.values():
         addr = solver.min(init_sp - addr_symbol)
         assert addr > 0
         solver.add(init_sp - addr_symbol == addr)
+
+        if addr in mem_val_map:
+            val = mem_val_map[addr]
+        else:
+            val = solver.min(init_sp - rd_symbol)
+            assert val > 0
+            solver.add(init_sp - rd_symbol == val)
+
+        # prepare value
+        init_code.append(UFmtInst('li', TEMP_REG, val))
+        init_code.append(RFmtInst('sub', TEMP_REG, 'sp', TEMP_REG))
+        # prepare address
         init_code.append(UFmtInst('li', TEMP_REG2, addr))
         init_code.append(RFmtInst('sub', TEMP_REG2, 'sp', TEMP_REG2))
+
         init_code.append(StoreInst('sd', TEMP_REG, TEMP_REG2, 0))
+
+        mem_val_map[addr] = val
 
     return init_code
 
