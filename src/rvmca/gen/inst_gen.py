@@ -84,6 +84,10 @@ def gen_inst(candidates: Dict = None):
     return random.choice(list(candidates.values()))
 
 
+def gen_imm(start=-8, end=8, divisor=1):
+    return random.randint(start // divisor, end // divisor) * divisor
+
+
 def gen_block(num_insts: int = 10, seed: int = None):
     if seed is not None:
         random.seed(seed)
@@ -101,5 +105,10 @@ def gen_block(num_insts: int = 10, seed: int = None):
         num_uses = len(inst.get_uses())
         if num_uses > 0:
             inst.set_uses([gen_reg() for _ in range(num_uses)])
+
+    # assign immediate
+    for inst in block[:-1]:
+        if hasattr(inst, 'imm'):
+            inst.imm = gen_imm(-8, 8, 8)
 
     return block
