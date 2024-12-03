@@ -56,50 +56,6 @@ TEMP_REG2 = 's11'
 REG_PREFIX = 'rvmca_reg_'
 
 
-def _legalize_branch(inst: Inst) -> Inst:
-    assert inst.type is IType.Branch
-    new_inst = copy.deepcopy(inst)
-    new_inst.imm = 4
-    return new_inst
-
-
-def _legalize_jump(inst: Inst) -> Inst:
-    assert inst.type is IType.Jump
-    from rvmca.prog.inst import BFmtInst, JalrInst, JFmtInst
-    if isinstance(inst, JalrInst):
-        new_inst = BFmtInst('beq', inst.rd.name, inst.rs1.name, 4)
-    elif isinstance(inst, JFmtInst):
-        new_inst = BFmtInst('bne', inst.rd.name, inst.rd.name, 4)
-    else:
-        raise NotImplementedError
-    return new_inst
-
-
-def legalize_jump_and_branch(prog: Program) -> Program:
-    """Legalize jump and branch for a block"""
-    check_block_validity(prog)
-
-    prog = copy.deepcopy(prog)
-
-    if prog.insts[-1].type is IType.Jump:
-        prog.insts[-1] = _legalize_jump(prog.insts[-1])
-    elif prog.insts[-1].type is IType.Branch:
-        prog.insts[-1] = _legalize_branch(prog.insts[-1])
-
-    return prog
-
-
-def zero_imm_for_block(prog: Program) -> Program:
-    """Zero the immediate in a block"""
-    check_block_validity(prog)
-    prog = copy.deepcopy(prog)
-    for idx, inst in enumerate(prog.insts):
-        if hasattr(inst, 'imm') \
-                and inst.type not in [IType.Branch, IType.Jump]:
-            inst.imm = 0
-    return prog
-
-
 def find_regs_no_def(prog: Program) -> List[Reg]:
     """find undefined registers"""
     check_block_validity(prog)

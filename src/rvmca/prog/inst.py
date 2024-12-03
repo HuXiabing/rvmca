@@ -190,7 +190,6 @@ class UFmtInst(Inst):
 class AmoInst(Inst):
     def __init__(self, name: str, rd: str, rs2: str, rs1: str, inst_to_copy=None):
         super().__init__(name)
-        assert isinstance(rd, str) and isinstance(rs1, str) and isinstance(rs2, str)
         self.rd, self.rs2, self.rs1 = (find_reg_by_name(name)
                                        for name in [rd, rs2, rs1])
         if name.startswith('lr.'):

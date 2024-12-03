@@ -19,10 +19,11 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+import copy
 from typing import List
 
 from rvmca.config import *
-from rvmca.prog import Program, IType, XREG
+from rvmca.prog import Program, IType, XREG, Inst
 from rvmca.utils.cmd_util import run_cmd
 from rvmca.utils.file_util import write_to_file
 import random
@@ -89,3 +90,51 @@ def disassemble(codes: List[str]) -> List[str]:
 
     pattern = r'^\s*[0-9a-f]+:\s+[0-9a-f]+\s+(.*)'
     return re.findall(pattern, output, re.MULTILINE)
+
+
+def _legalize_branch(inst: Inst) -> Inst:
+    assert inst.type is IType.Branch
+    new_inst = copy.deepcopy(inst)
+    new_inst.imm = 4
+    return new_inst
+
+
+def _legalize_jump(inst: Inst) -> Inst:
+    assert inst.type is IType.Jump
+    from rvmca.prog.inst import BFmtInst, JalrInst, JFmtInst
+    if isinstance(inst, JalrInst):
+        new_inst = BFmtInst('beq', inst.rd.name, inst.rs1.name, 4)
+    elif isinstance(inst, JFmtInst):
+        new_inst = BFmtInst('bne', inst.rd.name, inst.rd.name, 4)
+    else:
+        raise NotImplementedError
+    return new_inst
+
+
+def zero_imm_for_block(prog: Program) -> Program:
+    """Zero the immediate in a block"""
+    check_block_validity(prog)
+    prog = copy.deepcopy(prog)
+    for idx, inst in enumerate(prog.insts):
+        if hasattr(inst, 'imm') \
+                and inst.type not in [IType.Branch, IType.Jump]:
+            inst.imm = 0
+    return prog
+
+
+def legalize_jump_or_branch_inst(inst: Inst) -> Inst:
+    if inst.type is IType.Jump:
+        return _legalize_jump(inst)
+    elif inst.type is IType.Branch:
+        return _legalize_branch(inst)
+    return inst
+
+
+def legalize_jump_and_branch(prog: Program) -> Program:
+    """Legalize jump and branch for a block"""
+    check_block_validity(prog)
+
+    prog = copy.deepcopy(prog)
+    prog.insts[-1] = legalize_jump_or_branch_inst(prog.insts[-1])
+
+    return prog

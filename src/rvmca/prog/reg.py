@@ -83,6 +83,8 @@ def find_reg_by_name(name: str):
     A pre-defined corresponding register object\.
 
     """
+    if name is None:
+        return None
     assert name in _all_regs_numeric + _all_regs_abi, f"invalid register name {name}"
     for r in XREG + FREG:
         if r.name == name or r.abi_name == name:
