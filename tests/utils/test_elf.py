@@ -52,3 +52,21 @@ class TestElf:
         binary.patch_address(0x10698, [0xff, 0xff, 0xff, 0xff])
 
         binary.write(str(TESTS_INPUT_PATH / 'bin' / 'hello_new'))
+
+    def test_func_hash(self):
+        import lief
+
+        binary1 = lief.parse(TESTS_INPUT_PATH / 'bin' / 'coremark.riscv.clang20.o2')
+        binary2 = lief.parse(TESTS_INPUT_PATH / 'bin' / 'coremark.riscv.clang20.o2-chuxin1b')
+
+        def get_func_bytes(binary, name) -> memoryview:
+            func_symbol = binary.get_symbol(name)
+            assert func_symbol.is_function
+            content = binary.get_content_from_virtual_address(func_symbol.value, func_symbol.size)
+            return content
+
+        import hashlib
+        for b in [binary1, binary2]:
+            func_data = get_func_bytes(b, 'main')
+            md5_hash = hashlib.md5(func_data.tobytes()).hexdigest()
+            print(md5_hash)
