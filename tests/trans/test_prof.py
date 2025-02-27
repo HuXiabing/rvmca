@@ -89,3 +89,6 @@ class TestProf:
         rvfg = RVFG(ssas)
         rvfg.plot(OUTPUT_PATH / 'test.rvfg')
 
+    def test_tail_branch(self):
+        test_file = INPUT_PATH / 'test_branch.S'
+        transform_for_profiling(test_file)
