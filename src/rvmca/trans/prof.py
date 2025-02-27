@@ -423,8 +423,37 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     return init_code
 
+def replace_branch_jump(inst):
+    """
+    检查行首的8位十六进制数是否符合RISC-V分支指令的opcode(1100011),
+    若符合则替换为00000263,并保留行格式.
+    """
+    # 匹配行首的8位十六进制数
+    match = re.match(r"^\s*([0-9a-fA-F]{8})\b", inst)
+    if not match:
+        return inst
+    
+    hex_value = match.group(1)
+    try:
+        value = int(hex_value, 16)
+        if (value & 0x7F) == 0x63:  # 0x63表示branch类型指令
+            # 00000263表示beq x0, x0, 4
+            new_inst = re.sub(r""+hex_value, r"00000263", inst)
+            return new_inst
+        elif (value & 0x7F) == 0x6F : # 0x6F表示j类型指令
+            # 0040006f表示jal x0,4
+            new_inst = re.sub(r"" + hex_value, r"" + r"0040006f", inst) 
+            return new_inst
+        elif (value & 0x7F) == 0x67 : # 0x67表示jalr类型指令
+            # 00402067表示jalr x0,4(x0)
+            new_inst = re.sub(r"" + hex_value, r"" + r"00402067", inst)
+            return new_inst
+    except ValueError:
+        pass
+    
+    return inst
 
-def transform_for_profiling(filepath, output_path=''):
+def transform_for_profiling(filepath, output_path='', add_init: str = False):
     def assemble_code(code: str, name: str, suffix: str = 'code'):
         """Output a file named {name}.code"""
         write_to_file(f'{OUTPUT_PATH / name}.S', code, append=False)
@@ -437,6 +466,7 @@ def transform_for_profiling(filepath, output_path=''):
         codes = re.findall(pattern, output, re.MULTILINE)
         if codes[-1].startswith('0000006f'):
             codes = codes[:-1]
+        codes[-1] = replace_branch_jump(codes[-1])
         machine_code = '\n'.join(codes)
         write_to_file(f'{OUTPUT_PATH / name}.{suffix}', machine_code, append=False)
         return machine_code
