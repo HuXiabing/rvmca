@@ -113,9 +113,9 @@ int main(int argc, char *argv[]) {
     printf("\n");
 
     ENABLE_FPU
-    ENABLE_VPU
+//    ENABLE_VPU
 
-    init_fpu();
+//    init_fpu();
     unsigned long minN = LONG_MAX, min0 = LONG_MAX;
     for (int i = 0; i < 100; i++){
         run(&minN,&min0);

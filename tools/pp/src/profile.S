@@ -24,7 +24,7 @@ profile0:
 	.type	profileN, @function
 profileN:
 	fence
-	addi sp, sp, -96
+	addi sp, sp, -192
 	sd s0, 0(sp)
 	sd s1, 8(sp)
 	sd s2, 16(sp)
@@ -37,6 +37,18 @@ profileN:
 	sd s9, 72(sp)
 	sd s10, 80(sp)
 	sd s11, 88(sp)
+	fsd fs0, 96(sp)
+	fsd fs1, 104(sp)
+	fsd fs2, 112(sp)
+	fsd fs3, 120(sp)
+	fsd fs4, 128(sp)
+	fsd fs5, 136(sp)
+	fsd fs6, 144(sp)
+	fsd fs7, 152(sp)
+	fsd fs8, 160(sp)
+	fsd fs9, 168(sp)
+	fsd fs10, 176(sp)
+	fsd fs11, 184(sp)
 	addi sp, sp, -0x400
 profile_insn_init:
 	.rept MAX_INSN
@@ -66,5 +78,17 @@ profile_insn_start:
 	ld s9, 72(sp)
 	ld s10, 80(sp)
 	ld s11, 88(sp)
-	addi sp, sp, 96
+	fld fs0, 96(sp)
+	fld fs1, 104(sp)
+	fld fs2, 112(sp)
+	fld fs3, 120(sp)
+	fld fs4, 128(sp)
+	fld fs5, 136(sp)
+	fld fs6, 144(sp)
+	fld fs7, 152(sp)
+	fld fs8, 160(sp)
+	fld fs9, 168(sp)
+	fld fs10, 176(sp)
+	fld fs11, 184(sp)
+	addi sp, sp, 192
 	ret

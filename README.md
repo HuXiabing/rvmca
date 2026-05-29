@@ -22,7 +22,7 @@ pip list | grep pyvex
 # download pyvex
 # for example, get pyvex 9.2.125 in https://github.com/angr/pyvex/releases/tag/v9.2.125
 cd pyvex-9.2.125
-git clone https://github.com/hahaxxz/vex
+git clone https://github.com/hahaxxz/vex.git
 cd vex
 git checkout fix-riscv
 make -f Makefile-gcc

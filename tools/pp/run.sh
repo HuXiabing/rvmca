@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # 指定包含可执行程序的目录
-code_dir="/home/xuezheng/PycharmProjects/rvmca/tests/output/code/"
-result_dir="/home/xuezheng/PycharmProjects/rvmca/tests/output/result/"
+code_dir="/home/huxiabing/Documents/rvmca/tests/output/code/"
+result_dir="/home/huxiabing/Documents/rvmca/tests/output/result/"
 
 # 检查目录是否存在
 if [ ! -d "$code_dir" ]; then

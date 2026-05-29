@@ -1,0 +1,35 @@
+{
+  "summary": {
+    "tested": 2,
+    "passed": 0,
+    "failed": 2,
+    "pass_rate": 0.0,
+    "wall_time_s": 8.29
+  },
+  "per_benchmark": {
+    "400.perlbench": {
+      "total": 2,
+      "passed": 0,
+      "failed": 2
+    }
+  },
+  "still_failing": [
+    {
+      "id": "400.perlbench_116",
+      "benchmark": "400.perlbench",
+      "function": "Perl_newAV",
+      "asm": "ld a3,0(s0)\\naddi a4,zero,-1\\naddi a0,s0,0\\nlbu a5,72(a3)\\nori a5,a5,1\\nsb a5,72(a3)\\nld a5,0(s0)\\nsd zero,56(a5)\\nld a5,0(s0)\\nsd zero,0(a5)\\nld a5,0(s0)\\nsd a4,8(a5)\\nld a5,0(s0)\\nsd a4,16(a5)\\nld ra,8(sp)\\nld s0,0(sp)\\naddi sp,sp,16",
+      "error": "pp returned empty output",
+      "orig_status": "failure_no_cycle"
+    },
+    {
+      "id": "400.perlbench_220",
+      "benchmark": "400.perlbench",
+      "function": "Perl_av_undef",
+      "asm": "ld a4,0(s1)\\naddi a5,zero,-1\\nsd zero,56(a4)\\nld a4,0(s1)\\nsd zero,0(a4)\\nld a4,0(s1)\\nsd a5,8(a4)\\nld a4,0(s1)\\nsd a5,16(a4)\\nld a5,0(s1)\\nld a0,64(a5)",
+      "error": "pp returned empty output",
+      "orig_status": "failure_no_cycle"
+    }
+  ],
+  "now_passing": []
+}

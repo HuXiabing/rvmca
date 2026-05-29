@@ -1,17 +1,25 @@
 import subprocess
 import time
-
 from rvmca.log import *
 from rvmca.utils import regex_util
 
-
-def run_cmd(cmd):
+def run_cmd(cmd, timeout=60):
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd, 
+            shell=True, 
+            capture_output=True, 
+            text=True, 
+            check=True,
+            timeout=timeout
+        )
         return result.stdout
+    except subprocess.TimeoutExpired:
+        WARNING(f"Command timed out after {timeout} seconds: {cmd}")
+        return None
     except subprocess.CalledProcessError as e:
-        WARNING(e.stderr)
-    return None
+        # WARNING(e.stderr)
+        return None
 
 
 def run_cmd_to_log(cmd, out_file, err_file):

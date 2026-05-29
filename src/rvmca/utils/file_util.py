@@ -124,7 +124,7 @@ def get_file_name_from_path(file_path: str):
 def rm_file(file_path):
     if os.path.exists(file_path) and os.path.isfile(file_path):
         os.remove(file_path)
-        INFO(f'rm file: {file_path}')
+        # INFO(f'rm file: {file_path}')
 
 
 def rm_files_in_dir(dir_path):

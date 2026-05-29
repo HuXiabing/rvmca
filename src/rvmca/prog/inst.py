@@ -389,7 +389,11 @@ _mem_width_map = {
     'lwu': 4,
     'sw': 4,
     'ld': 8,
-    'sd': 8
+    'sd': 8,
+    'flw': 4,
+    'fsw': 4,
+    'fld': 8,
+    'fsd': 8
 }
 
 

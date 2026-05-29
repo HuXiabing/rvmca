@@ -11,13 +11,13 @@
 long profile0();
 long profileN();
 
-void init_fpu();
+//void init_fpu();
 
 extern uint32_t profile_insn_start;
 extern uint32_t profile_insn_init;
 
 #define ENABLE_FPU asm volatile("fadd.d f0,f0,f0\n" :::"memory");
-#define ENABLE_VPU asm volatile("vsetvli x0, x0, e32, ta, ma\n" :::"memory");
+//#define ENABLE_VPU asm volatile("vsetvli x0, x0, e32, ta, ma\n" :::"memory");
 
 #define MATCH_JALR 0x67
 #define MASK_JALR  0x707f

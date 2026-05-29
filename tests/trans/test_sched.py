@@ -32,7 +32,7 @@ all_tests = list_files(TESTS_INPUT_PATH / 'dv', '.S')
 class TestSched:
 
     def test_one_case_with_name(self):
-        filepath = '/home/xuezheng/PycharmProjects/rvmca/tests/input/dv/test805.S'
+        filepath = '/home/huxiabing/Documents/rvmca/tests/output/code/test.S'
         self.test_one_case(filepath)
 
     @pytest.mark.parametrize('filepath', all_tests)

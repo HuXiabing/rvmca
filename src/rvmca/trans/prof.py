@@ -32,7 +32,7 @@ from rvmca.trans.block import *
 import math
 
 from rvmca.prog import IType, Program, Reg, XREG, FREG, Inst, parse_program, SSAInst, IFmtInst, BFmtInst, UFmtInst, \
-    RFmtInst, StoreInst
+    RFmtInst, StoreInst, FRRFmtInst, FRRRRFmtInst
 import copy
 import angr, claripy
 
@@ -182,27 +182,76 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
             imm = inst.imm
             # temp = base + offset
             insts.append(UFmtInst('li', temp, imm))
-            insts.append(RFmtInst('add', temp, str(addr), temp))
+            insts.append(RFmtInst('add', temp, str(addr), temp)) # 计算实际地址
             # temp < sp
             insts.append(BFmtInst('bge', temp, 'sp', label='fail'))
             # temp >= sp - STACK_RANGE
             insts.append(IFmtInst('addi', temp, temp, STACK_RANGE))
             insts.append(BFmtInst('blt', temp, 'sp', label='fail'))
-            if inst.width == 1:
-                continue
-            # check address alignment
-            mask = (1 << math.floor(math.log2(inst.width))) - 1
-            # TODO: it is ugly
-            # temp & mask == 0
-            insts.append(IFmtInst('addi', temp, temp, -STACK_RANGE))
-            insts.append(IFmtInst('andi', temp, temp, mask))
-            insts.append(BFmtInst('bne', temp, 'x0', label='fail'))
+            if inst.width > 1:
+                # check address alignment
+                mask = inst.width - 1
+                # TODO: it is ugly
+                # temp & mask == 0
+                insts.append(IFmtInst('addi', temp, temp, -STACK_RANGE))  #还原回实际地址
+                insts.append(IFmtInst('andi', temp, temp, mask))  # 检查地址对齐
+                insts.append(BFmtInst('bne', temp, 'x0', label='fail'))
+        # if inst.type in [IType.Load, IType.Store, IType.Amo]:
+        #     addr = inst.get_addr()
+        #     imm = inst.imm
+            
+        #     insts.append(UFmtInst('li', temp, imm))
+        #     insts.append(RFmtInst('add', temp, str(addr), temp)) # temp = 实际地址
+            
+        #     # A. 检查对齐 (在 temp 被加 STACK_RANGE 之前)
+        #     if inst.width > 1:
+        #         mask = inst.width - 1
+        #         # 技巧：如果我们只有一个 temp，可以先算对齐，不合规则直接 fail
+        #         # 如果合规，对齐位必然是0，这时 temp 其实没变（或者说变了也没关系，因为后面可以靠 addi 补回来）
+        #         # 但最稳妥的是如果有 TEMP_REG2 (如 t1)，直接：
+        #         # insts.append(IFmtInst('andi', TEMP_REG2, temp, mask))
+        #         # insts.append(BFmtInst('bne', TEMP_REG2, 'x0', label='fail'))
+
+        #     # B. 检查上限：temp < sp
+        #     insts.append(BFmtInst('bge', temp, 'sp', label='fail'))
+
+        #     # C. 检查下限：temp >= sp - STACK_RANGE
+        #     # 这里不可避免要修改 temp
+        #     insts.append(IFmtInst('addi', temp, temp, STACK_RANGE))
+        #     insts.append(BFmtInst('blt', temp, 'sp', label='fail'))
+            
+        #     # 此时不需要 addi temp, temp, -STACK_RANGE 了，
+        #     # 因为原始指令 inst 会使用原来的 rs1+imm，不依赖 temp 里的值
+
         insts.append(inst)
     prog.insts = insts
     return prog
 
 
-def init_states_for_block(prog: Program, name: str) -> List[Inst]:
+def fix_lui_auipc_imm(prog: Program) -> Program:
+    """Set imm to 0 for lui/auipc instructions.
+
+    This is useful to avoid illegal memory access caused by large random immediates.
+    lui rd, imm  -> lui rd, 0
+    auipc rd, imm -> auipc rd, 0
+    Assuming the specific imm value doesn't affect the block's execution cycle count.
+
+    Args:
+        prog: The program to modify
+
+    Returns:
+        Modified program
+    """
+    prog = copy.deepcopy(prog)
+    for i, inst in enumerate(prog.insts):
+        if isinstance(inst, UFmtInst) and inst.name in ['lui','auipc']:
+            # Set imm to 0 for lui/auipc instructions
+            # lui rd, imm -> lui rd, 0
+            # auipc rd, imm -> auipc rd, 0
+            inst.imm = 0x0
+    return prog
+
+def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]:
     """generate init code for a block"""
     regs_defined = {XREG[0], XREG[2]}  # x0, sp
     init_code = []
@@ -222,36 +271,65 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     from rvmca.analysis import CFG, path_to_ssa
     cfg = CFG(prog.insts)
     ssas = path_to_ssa(cfg.edges)
+    if verbose:
+        print('ssas:', ssas)
     rvfg = RVFG(ssas)
     # rvfg.plot(OUTPUT_PATH / 'fail')
-    # FIXME: we only consider xregs for now
-    regs_undefined = list({r for r in rvfg.find_undef_regs()
-                           if r in XREG and r not in regs_defined})
+    # # FIXME: we only consider xregs for now
+    # regs_undefined = list({r for r in rvfg.find_undef_regs()
+    #                        if r in XREG and r not in regs_defined})
 
-    # add dummy checking for undefined registers to avoid unconstrained symbol
+    # Find undefined registers from SSA instructions:
+    # In SSA form, a register with index 0 (e.g., a5_0) that appears in use_regs
+    # is undefined (except x0_0 which is the zero register).
+    regs_undefined = []
+    for ssa_inst in ssas:
+        for reg_bitvec in ssa_inst.get_uses():
+            # Extract register name and index (e.g., "a5_0" -> name="a5", index=0)
+            reg_str = str(reg_bitvec)
+            if '_' not in reg_str:
+                continue
+            reg_name = reg_str.split('_')[0]
+            try:
+                reg_idx = int(reg_str.split('_')[1])
+            except (ValueError, IndexError):
+                continue
+
+            # Register with index 0 is undefined (except x0)
+            if reg_idx == 0 and reg_name != 'x0':
+                from rvmca.prog.reg import find_reg_by_name
+                reg = find_reg_by_name(reg_name)
+                # Handle both XREG and FREG
+                if reg in XREG and reg not in regs_defined and reg not in regs_undefined:
+                    regs_undefined.append(reg)
+
+    # add dummy checking for undefined registers to avoid unconstrained symbol(regs_undefined>0)
     prog2se = add_undef_reg_checking(prog2se, list(regs_undefined))
+    print("prog2se",prog2se)
     last_inst = prog2se.insts[-1]
     if isinstance(last_inst, BFmtInst):
         last_inst.label = 'rvmca_block_end'
         last_inst.imm = None
 
-    INFO('\n<New Block with address range checking>:')
-    INFO(prog2se.code)
+    if verbose:
+        INFO('\n<New Block with address range checking>:')
+        INFO(prog2se.code)
     compile_block(prog2se, name)
     proj = angr.Project(f'{OUTPUT_PATH / name}.exe', auto_load_libs=False)
     begin_addr = proj.loader.main_object.get_symbol('rvmca_block_begin').rebased_addr
     end_addr = proj.loader.main_object.get_symbol('rvmca_block_end').rebased_addr
+    # print(f'begin_addr: {begin_addr:#x}, end_addr: {end_addr:#x}')
     init_state = proj.factory.blank_state(addr=begin_addr,
                                           mode='symbolic',
                                           add_options={
-                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
-                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
-                                              angr.options.CONSERVATIVE_WRITE_STRATEGY,
-                                              angr.options.CONSERVATIVE_READ_STRATEGY,
+                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY, # 用符号填充未约束的内存
+                                              angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS, # 用符号填充未约束的寄存器
+                                              angr.options.CONSERVATIVE_WRITE_STRATEGY, # 保守的写策略
+                                              angr.options.CONSERVATIVE_READ_STRATEGY,  # 保守的读策略
                                           },
                                           )
     from rvmca.prog import UFmtInst
-    init_state.options.discard(angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS)
+    init_state.options.discard(angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS) # 未约束的寄存器会被符号填充而不是零填充
     DEBUG(init_state.options.tally())
 
     # init_state.options.remove(angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS)
@@ -261,34 +339,93 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     #     INFO(f"{inst.address:#x}: {inst.mnemonic} {inst.op_str}")
     # end_addr = block.instruction_addrs[-1]
 
-    def find_base_addr(ssa_inst):
+    def find_base_addr(ssa_inst): # 找到构造该访存地址的源头
         assert ssa_inst.is_ldst()
         addr_reg = ssa_inst.get_addr()
         tgt_node = rvfg.find_node_by_value(addr_reg)
-        clean_insts = ['add', 'addi', 'addw', 'addiw']
-        paths = rvfg.find_clean_paths(rvfg.undef, tgt_node, clean_insts)
-        if len(paths) == 0:
-            clean_insts.append('ld')
-            paths = rvfg.find_clean_paths(rvfg.mem, tgt_node, clean_insts)
-            assert len(paths) > 0
-            return [p[0].attr.inst for p in paths]
-        else:
-            return [p[0].tgt.value for p in paths]
+
+        clean_insts = ['add', 'addi', 'addw', 'addiw',
+                       'sub', 'subw',
+                       'mul', 'mulw',
+                       'and', 'andi',
+                       'slli', 'srli', 'srai'
+                       ]
+
+        # 查找来自未定义寄存器的路径
+        undef_paths = rvfg.find_clean_paths(rvfg.undef, tgt_node, clean_insts)
+        # 查找来自内存加载的路径
+        mem_clean_insts = clean_insts + ['ld', 'lw', 'lh', 'lb', 'lwu', 'lhu', 'lbu']
+        mem_paths = rvfg.find_clean_paths(rvfg.mem, tgt_node, mem_clean_insts)
+
+        undef_results = []
+        for path in undef_paths:
+            src = path[0].tgt.value
+            if not any(src is item for item in undef_results):
+                undef_results.append(src)
+                
+        mem_results = []
+        for path in mem_paths:
+            inst = path[0].attr.inst
+            if inst not in mem_results:
+                mem_results.append(inst)
+
+        return undef_results + mem_results
+
 
     # map ssa inst to its addr base reg
     undef_base_regs = []
     mem_base_insts = []
     for inst in [i for i in ssas if i.is_ldst()]:
-        for r in find_base_addr(inst):
-            if isinstance(r, BitVecRef):
-                reg = bitvec_to_reg(r)
-                if reg not in undef_base_regs:
-                    undef_base_regs.append(reg)
-            elif isinstance(r, Inst):
+        sources = find_base_addr(inst)
+        # 检查该指令是否已经有一个来源被标记为基准（已覆盖）
+        covered = False
+        for s in sources:
+            if isinstance(s, BitVecRef):
+                if bitvec_to_reg(s) in undef_base_regs:
+                    covered = True; break
+            elif isinstance(s, Inst):
+                if any(m.pc == s.pc for m in mem_base_insts):
+                    covered = True; break
+        
+        # 如果未被覆盖，则根据优先级挑选一个作为基准（优先选内存加载）
+        if not covered and sources:
+            mems = [s for s in sources if isinstance(s, Inst)]
+            if mems:
+                s = mems[0]
                 for i in prog2se.insts:
-                    if i.pc == r.pc:
-                        mem_base_insts.append(i)
-                        break
+                    if i.pc == s.pc:
+                        mem_base_insts.append(i); break
+            else:
+                undef_base_regs.append(bitvec_to_reg(sources[0]))
+    print("undef_base_regs",undef_base_regs)
+    print("mem_base_insts",mem_base_insts)
+
+    # 穿透内存 Store 的追踪逻辑：处理内存作为中转站的情况
+    extra_undef = []
+    for load_inst in mem_base_insts:
+        # 找到在该 Load 之前、且地址相同的最近一次 Store
+        try:
+            idx = load_inst.idx
+            for i in range(idx - 1, -1, -1):
+                prev = ssas[i]
+                if prev.is_store() and prev.inst.addr == load_inst.addr:
+                    # 找到了对应的 Store，追踪它的数据来源 (rs2)
+                    data_reg = prev.inst.rs2
+                    data_node = rvfg.find_node_by_value(data_reg)
+                    if data_node:
+                        # 查找数据来源的原始路径
+                        added_undef_paths = rvfg.find_clean_paths(rvfg.undef, data_node, clean_insts)
+                        for p in added_undef_paths:
+                            src = p[0].tgt.value
+                            if not any(src is item for item in undef_results + extra_undef):
+                                extra_undef.append(src)
+                    else:
+                        extra_undef.append(data_reg)
+                    break  # 找到最近的一次 Store 即可停止
+        except (ValueError, AttributeError):
+            continue
+    print("extra_undef", extra_undef)
+
 
     # zero fill integer registers
     for i in range(32):
@@ -304,7 +441,7 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         setattr(init_state.regs, r.name, var)
         reg_to_symbol[r] = var
 
-    DEBUG(f'{regs_undefined =}')
+    DEBUG(f'{reg_to_symbol =}')
 
     # init_state.add_constraints(init_sp == claripy.BVV(0x7fff0000, 64))
     init_state.add_constraints(init_state.regs.x0 == 0)
@@ -313,25 +450,28 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     simgr = proj.factory.simulation_manager(init_state)
 
     # mapping unconstrained symbol to undefined registers
-    simgr.explore(find=begin_addr + len(regs_undefined) * 4)
+    simgr.explore(find=begin_addr + len(regs_undefined) * 4) # 确保符号执行能够执行完所有的寄存器检查指令
     history_events = simgr.found[0].history.events.hardcopy
-    DEBUG(f'{history_events = }')
     history_events = [e for e in history_events if isinstance(e, SimActionConstraint)]
+    if verbose:
+        DEBUG(f'{history_events = }')
     for i, event in enumerate(history_events):
         constraint = event.constraint
-        assert constraint.ast.op is 'SGE'
-        reg_symbol = constraint.ast.args[0]
+        assert constraint.ast.op == 'SGE'
+        reg_symbol = constraint.ast.args[0]  # 当前引擎真正正在使用的那个符号 AST 对象，符号执行引擎内部用来代表那个未定义寄存器的“符号变量对象”
         if not str(reg_symbol).startswith(f'<BV64 {REG_PREFIX}'):
             r = regs_undefined[i]
             reg_to_symbol[r] = reg_symbol
             WARNING(f'unconstrained register: {str(reg_symbol)} for {r}')
-
+    print("reg_to_symbol",reg_to_symbol)
+    
     # capture unconstrained load value
     mem_base_insts = list(mem_base_insts)
     mem_base_insts.sort(key=lambda i: i.pc)
     mem_base_map = {}
+    # print('mem_base_insts', mem_base_insts)
     for inst in mem_base_insts:
-        target_addr = begin_addr + prog2se.insts.index(inst) * 4
+        target_addr = begin_addr + prog2se.insts.index(inst) * 4 #模拟执行，停在指令即将执行的那一刻
         pc = simgr.found[0].ip.concrete_value
         assert pc <= target_addr
         if pc < target_addr:
@@ -350,7 +490,7 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
         target_addr += 4
         simgr = proj.factory.simulation_manager(simgr.found[0])
-        simgr.explore(find=target_addr)
+        simgr.explore(find=target_addr) ## 执行这条 ld 指令
         assert simgr.found
 
         events = list(simgr.found[0].history.events.hardcopy)
@@ -360,7 +500,8 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
             if event.ins_addr == target_addr - 4:
                 rd_symbol = getattr(simgr.found[0].regs, str(inst.rd))
                 mem_base_map[inst] = (rd_symbol, addr_symbol)
-                DEBUG(f'memory unconstrained symbol {name}: {rd_symbol = } {addr_symbol = }')
+                if verbose:
+                    DEBUG(f'memory unconstrained symbol {name}: {rd_symbol = } {addr_symbol = }')
                 break
 
     # create a simulation manager
@@ -370,8 +511,9 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
     assert simgr.found, f'simulation fails at {end_addr:#x}'
     final_state = simgr.found[0]
 
-    DEBUG(f'{final_state.solver.constraints = }')
-    DEBUG(f'{final_state.history.events.hardcopy = }')
+    if verbose:
+        DEBUG(f'{final_state.solver.constraints = }')
+        DEBUG(f'{final_state.history.events.hardcopy = }')
     solver = final_state.solver
     solver.add(final_state.regs.x0 == 0)
 
@@ -382,24 +524,30 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
 
     undefined_reg_vars = [reg for reg in regs_undefined if reg not in undef_base_regs]
     undefined_base_vars = [reg for reg in regs_undefined if reg in undef_base_regs]
-
+    
+    offset = 0
     for r in undefined_reg_vars:
         symbol = reg_to_symbol[r]
-        val = solver.min(symbol)
+        val = solver.min(symbol) + offset
+        # val = solver.min(symbol)
         init_code.append(UFmtInst('li', r.name, val))
         solver.add(symbol == val)
+        offset += 8
 
-    for r in undefined_base_vars:
+    for r in undefined_base_vars + extra_undef:
         symbol = reg_to_symbol[r]
-        val = solver.min(init_sp - symbol)
+        val = solver.min(init_sp - symbol) + offset
+        # val = solver.min(init_sp - symbol)
         init_code.append(UFmtInst('li', r.name, val))
         init_code.append(RFmtInst('sub', r.name, 'sp', r.name))
         solver.add(init_sp - symbol == val)
+        offset += 8
 
     mem_val_map = {}
-
+    print('mem_base_map', mem_base_map)
+    offset = 0
     for rd_symbol, addr_symbol in mem_base_map.values():
-        addr = solver.min(init_sp - addr_symbol)
+        addr = solver.min(init_sp - addr_symbol) 
         assert addr > 0
         solver.add(init_sp - addr_symbol == addr)
 
@@ -422,6 +570,7 @@ def init_states_for_block(prog: Program, name: str) -> List[Inst]:
         mem_val_map[addr] = val
 
     return init_code
+
 
 def replace_branch_jump(inst):
     """
@@ -453,26 +602,42 @@ def replace_branch_jump(inst):
     
     return inst
 
-def transform_for_profiling(filepath, output_path='', add_init: str = False):
+def transform_for_profiling(filepath, output_path='', add_init: str = False, verbose: bool = False):
     def assemble_code(code: str, name: str, suffix: str = 'code'):
         """Output a file named {name}.code"""
-        write_to_file(f'{OUTPUT_PATH / name}.S', code, append=False)
-        run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / name}.S -c -o {OUTPUT_PATH / name}.o')
-        output = run_cmd(f'{RISCV_OBJDUMP} -d {OUTPUT_PATH / name}.o')
+        try:
+            write_to_file(f'{OUTPUT_PATH / name}.S', code, append=False)
+            run_cmd(f'{RISCV_GCC} {OUTPUT_PATH / name}.S -c -o {OUTPUT_PATH / name}.o')
+            output = run_cmd(f'{RISCV_OBJDUMP} -d {OUTPUT_PATH / name}.o')
 
-        import re
-        pattern = r'^\s*[0-9a-f]+:\s+(.*)'
-        # pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
-        codes = re.findall(pattern, output, re.MULTILINE)
-        if codes[-1].startswith('0000006f'):
-            codes = codes[:-1]
-        codes[-1] = replace_branch_jump(codes[-1])
-        machine_code = '\n'.join(codes)
-        write_to_file(f'{OUTPUT_PATH / name}.{suffix}', machine_code, append=False)
-        return machine_code
+            import re
+            pattern = r'^\s*[0-9a-f]+:\s+(.*)'
+            # pattern = r'^\s*[0-9a-f]+:\s+([0-9a-f]+)'
+            codes = re.findall(pattern, output, re.MULTILINE)
+            if codes and codes[-1].startswith('0000006f'):
+                codes = codes[:-1]
+            if codes:
+                codes[-1] = replace_branch_jump(codes[-1])
+            machine_code = '\n'.join(codes)
+            write_to_file(f'{OUTPUT_PATH / name}.{suffix}', machine_code, append=False)
+            return machine_code
+        except Exception as e:
+            if not verbose:
+                cleanup_resources(name)
+            raise RuntimeError(f"Assemble code failed: {e}")
+    
+    def cleanup_resources(name):
+        files_to_remove = [
+            f"{OUTPUT_PATH / name}.S",
+            f"{OUTPUT_PATH / name}.o",
+            f"{OUTPUT_PATH / name}.code",
+            f"{OUTPUT_PATH / name}.init",
+            f"{OUTPUT_PATH / name}.exe"
+        ]
+        for file_path in files_to_remove:
+            rm_file(file_path)
 
-    # read file
-    INFO(f'transform [{filepath}]')
+    # INFO(f'transform [{filepath}]')
     filepath = str(filepath)
     test_name = filepath.split('/')[-1].replace('.S', '')
     content = read_file(filepath) + '\n'
@@ -482,41 +647,43 @@ def transform_for_profiling(filepath, output_path='', add_init: str = False):
     if output_path == '':
         output_path = f"{OUTPUT_PATH / test_name}"
 
+    result = None
     try:
         # transform block
-        INFO(f'<Block>:\n{content}')
         prog = parse_program(content)
         # prog = zero_imm_for_block(prog)
         prog = legalize_jump_and_branch(prog)
         prog = remap_regs_for_block(prog)
+        # fix lui/auipc to use sp as base address
+        # prog = fix_lui_auipc_imm(prog)
+        INFO(f'<Block>:\n{content}')
         INFO(f'<New Block>:\n{prog.code}')
-        init_insts = init_states_for_block(prog, name=test_name)
+        init_insts = init_states_for_block(prog, name=test_name, verbose=verbose)
         init_code = '\n'.join([inst.code for inst in init_insts])
         test_code = '\n'.join([inst.code for inst in prog.insts])
-        INFO('\n<New Block with init code>:')
-        INFO('# init code')
-        INFO(init_code)
-        INFO('# test code')
-        INFO(test_code)
 
-        assemble_code(init_code, test_name, suffix='init')
-        assemble_code(test_code, test_name)
+        if verbose:
+            INFO('\n<New Block with init code>:')
+            INFO('# init code')
+            INFO(init_code)
+            INFO('# test code')
+            INFO(test_code)
 
-        # run new block with pp
-        test_path = OUTPUT_PATH / test_name
-        result = run_cmd(f"qemu-riscv64 {TOOLS_PATH / 'pp' / 'pp'} {test_path}.init {test_path}.code")
-
+        assemble_code(init_code, test_name, suffix='init')   #test_name.init
+        assemble_code(test_code, test_name, suffix='code')   #test_name.code
+        result = run_cmd(f"qemu-riscv64 {TOOLS_PATH / 'pp' / 'pp'} {output_path}.init {output_path}.code")
+        
         if not result:
-            run_cmd(f"echo '# init code' > {output_path}.error")
-            run_cmd(f"cat {OUTPUT_PATH / test_name}.init >> {output_path}.error")
-            run_cmd(f"echo '\n\n# test code' >> {output_path}.error")
-            run_cmd(f"cat {OUTPUT_PATH / test_name}.code >> {output_path}.error")
-            run_cmd(f"echo '\n\nError: pp fails.' >> {output_path}.error")
-            rm_file(f"{OUTPUT_PATH / test_name}.code")
-            rm_file(f"{OUTPUT_PATH / test_name}.init")
-        else:
-            run_cmd(f"mv {OUTPUT_PATH / test_name}.code {output_path}.code")
-            run_cmd(f"mv {OUTPUT_PATH / test_name}.init {output_path}.init")
+                run_cmd(f"echo '# init code' > {output_path}.error")
+                run_cmd(f"cat {OUTPUT_PATH / test_name}.init >> {output_path}.error")
+                run_cmd(f"echo '\n\n# test code' >> {output_path}.error")
+                run_cmd(f"cat {OUTPUT_PATH / test_name}.code >> {output_path}.error")
+                run_cmd(f"echo '\n\nError: pp fails.' >> {output_path}.error")
+        # rm_file(f"{OUTPUT_PATH / test_name}.code")
+        # rm_file(f"{OUTPUT_PATH / test_name}.init")
+            # else:
+                # run_cmd(f"mv {OUTPUT_PATH / test_name}.code {output_path}.code")
+                # run_cmd(f"mv {OUTPUT_PATH / test_name}.init {output_path}.init")
         assert result, "Error: pp fails."
     except Exception as e:
         import traceback
@@ -528,6 +695,9 @@ def transform_for_profiling(filepath, output_path='', add_init: str = False):
         rm_file(f"{OUTPUT_PATH / test_name}.S")
         rm_file(f"{OUTPUT_PATH / test_name}.exe")
         if not failed:
-            INFO(f'Successfully!\n')
-        else:
-            raise AssertionError(error_msg)
+            # INFO(f'Successfully!\n')
+            pass
+        # else:
+        #     raise AssertionError(error_msg)
+    
+    return result
