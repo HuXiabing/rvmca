@@ -17,14 +17,14 @@ profile0:
 
 	__COUNT_END
 	fence
-	sub	a0,a0,a5
+	sub	a0,a0,t6
 	ret
 	.globl	profileN
 	.globl  profile_insn_start, profile_insn_init
 	.type	profileN, @function
 profileN:
 	fence
-	addi sp, sp, -192
+	addi sp, sp, -240
 	sd s0, 0(sp)
 	sd s1, 8(sp)
 	sd s2, 16(sp)
@@ -49,13 +49,19 @@ profileN:
 	fsd fs9, 168(sp)
 	fsd fs10, 176(sp)
 	fsd fs11, 184(sp)
+	sd ra, 192(sp)
+	sd gp, 200(sp)
+	sd tp, 208(sp)
 	addi sp, sp, -0x400
 profile_insn_init:
 	.rept MAX_INSN
 	nop
 	.endr
 	fence
+	sd	t6, 1248(sp)
 	__COUNT_START
+	sd	t6, 1240(sp)
+	ld	t6, 1248(sp)
 	.rept PIPELINE_DEPTH
 	nop
 	.endr
@@ -64,7 +70,8 @@ profile_insn_start:
 	nop
 	.endr
 	fence
-	sub	a0,a0,a5
+	ld	t6, 1240(sp)
+	sub	a0,a0,t6
 	addi sp, sp, 0x400
 	ld s0, 0(sp)
 	ld s1, 8(sp)
@@ -90,5 +97,8 @@ profile_insn_start:
 	fld fs9, 168(sp)
 	fld fs10, 176(sp)
 	fld fs11, 184(sp)
-	addi sp, sp, 192
+	ld ra, 192(sp)
+	ld gp, 200(sp)
+	ld tp, 208(sp)
+	addi sp, sp, 240
 	ret

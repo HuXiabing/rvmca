@@ -20,12 +20,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Any
 
-from rvmca.trans.prof import transform_for_profiling
-from rvmca.config import OUTPUT_PATH
-
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 TESTS_DIR = Path(__file__).parent
+REPO_ROOT = TESTS_DIR.parent
+SRC_DIR = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
+
+from rvmca.trans.prof import transform_for_profiling
+from rvmca.config import OUTPUT_PATH
+
 JSON_PATH  = TESTS_DIR / "analysis_results.json"
 REPORT_DIR = TESTS_DIR / "failure_reports"
 REPORT_DIR.mkdir(exist_ok=True)
@@ -139,6 +143,16 @@ def _run_single_block_uncapped(block_id: str, asm_raw: str, verbose: bool = Fals
             }
 
         error_file_text = read_text_if_exists(Path(str(out_prefix) + ".error"))
+        if not error_file_text and "Traceback" not in trace_text:
+            return {
+                "id": block_id,
+                "passed": True,
+                "skipped": False,
+                "failure_kind": None,
+                "result": result,
+                "error": None,
+                "elapsed_s": elapsed,
+            }
         failure_kind, error = classify_failure(trace_text, error_file_text)
         return {
             "id": block_id,
@@ -199,6 +213,18 @@ def run_single_block(
     process.join(timeout_s)
 
     if process.is_alive():
+        safe_id = block_id.replace("/", "_").replace(".", "_")
+        out_prefix = OUTPUT_PATH / f"batch_{safe_id}"
+        stage_file = Path(str(out_prefix) + ".stage.json")
+        timeout_stage = None
+        timeout_stage_detail = None
+        if stage_file.exists():
+            try:
+                timeout_stage_detail = json.loads(stage_file.read_text(encoding="utf-8"))
+                timeout_stage = timeout_stage_detail.get("stage")
+            except Exception:
+                timeout_stage_detail = None
+
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -215,13 +241,18 @@ def run_single_block(
                 process.kill()
             process.join(5)
 
+        error = f"block timed out after {timeout_s}s"
+        if timeout_stage:
+            error += f" at {timeout_stage}"
         return {
             "id": block_id,
             "passed": False,
             "skipped": False,
             "failure_kind": "timeout_failed",
             "result": None,
-            "error": f"block timed out after {timeout_s}s",
+            "error": error,
+            "timeout_stage": timeout_stage,
+            "timeout_stage_detail": timeout_stage_detail,
             "elapsed_s": time.time() - t0,
         }
 
@@ -267,9 +298,27 @@ def test_all_failures(
     timeout_s: int = DEFAULT_BLOCK_TIMEOUT_S,
     jobs: int = 1,
     resume: bool = False,
+    report_prefix: str = "retest_results",
+    ids_file: str = None,
+    schedule: str = "original",
 ):
     print(f"Loading failures from: {JSON_PATH}")
     all_failures = load_all_failures(JSON_PATH)
+    if ids_file:
+        wanted_ids = [
+            line.strip()
+            for line in Path(ids_file).read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        by_id = {failure.get("id"): failure for failure in all_failures}
+        missing = [block_id for block_id in wanted_ids if block_id not in by_id]
+        if missing:
+            print(f"Warning: {len(missing)} ids from {ids_file} are not present in {JSON_PATH}")
+        all_failures = [by_id[block_id] for block_id in wanted_ids if block_id in by_id]
+    if schedule not in {"original", "sorted"}:
+        raise ValueError(f"unsupported schedule: {schedule}")
+    if schedule == "sorted":
+        all_failures = sorted(all_failures, key=lambda item: item.get("id", ""))
     total = len(all_failures)
     print(f"Total failure blocks to test: {total}")
 
@@ -282,7 +331,7 @@ def test_all_failures(
     now_passing:   List[Dict[str, Any]] = []
     skipped:       List[Dict[str, Any]] = []
     failure_kinds: Dict[str, int] = {}
-    partial_path = REPORT_DIR / "retest_results.partial.jsonl"
+    partial_path = REPORT_DIR / f"{report_prefix}.partial.jsonl"
     completed_by_id = load_partial_results(partial_path) if resume else {}
     completed_by_id = {
         block_id: item
@@ -434,7 +483,7 @@ def test_all_failures(
             print(f"    {kind}: {count}")
 
     # ── Save detailed JSON report ─────────────────────────────────────────
-    report_path = REPORT_DIR / "retest_results.json"
+    report_path = REPORT_DIR / f"{report_prefix}.json"
     report = {
         "summary": {
             "tested":  tested,
@@ -445,6 +494,9 @@ def test_all_failures(
             "wall_time_s": round(wall_elapsed, 2),
             "block_timeout_s": timeout_s,
             "jobs": jobs,
+            "schedule": schedule,
+            "ids_file": ids_file,
+            "report_prefix": report_prefix,
             "failure_kinds": failure_kinds,
         },
         "per_benchmark": bench_stats,
@@ -546,6 +598,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Resume from failure_reports/retest_results.partial.jsonl"
     )
+    parser.add_argument(
+        "--report-prefix",
+        default="retest_results",
+        help="Prefix for JSON and partial report files"
+    )
+    parser.add_argument(
+        "--ids-file",
+        default=None,
+        help="Optional newline-separated block id list to test"
+    )
+    parser.add_argument(
+        "--schedule",
+        default="original",
+        choices=["original", "sorted"],
+        help="Block ordering"
+    )
     args = parser.parse_args()
 
     test_all_failures(
@@ -554,4 +622,7 @@ if __name__ == "__main__":
         timeout_s=args.timeout,
         jobs=args.jobs,
         resume=args.resume,
+        report_prefix=args.report_prefix,
+        ids_file=args.ids_file,
+        schedule=args.schedule,
     )

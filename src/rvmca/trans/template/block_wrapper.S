@@ -13,6 +13,7 @@ rvmca_init:
 #INIT#
 rvmca_block_begin:
 #CODE#
+    j rvmca_block_end
 rvmca_block_end:
     ret
 fail:

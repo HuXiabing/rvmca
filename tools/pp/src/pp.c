@@ -25,15 +25,17 @@ char lines[MAX_INSN][1024];
 
 int read_insns_from_file(FILE* file){
     int i = 0;
-    // 按行读取文件
-    while (fgets(lines[i], sizeof(lines[i]), file) != NULL) {
-        // 去除行尾的换行符
-        lines[i][strcspn(lines[i], "\n")] = 0;
-        // 检查行是否为空或仅包含空格和回车
-        if (!is_empty_or_space(lines[i]))
-            i++;
-        if(i>=MAX_INSN)
-            break;
+    char buf[1024];
+
+    while (fgets(buf, sizeof(buf), file) != NULL) {
+        buf[strcspn(buf, "\n")] = 0;
+        if (is_empty_or_space(buf))
+            continue;
+        if (i >= MAX_INSN)
+            return MAX_INSN + 1;
+        strncpy(lines[i], buf, sizeof(lines[i]) - 1);
+        lines[i][sizeof(lines[i]) - 1] = 0;
+        i++;
     }
     return i;
 }
