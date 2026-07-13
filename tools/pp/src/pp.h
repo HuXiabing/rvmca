@@ -11,7 +11,7 @@
 long profile0();
 long profileN();
 
-//void init_fpu();
+void init_fpu();
 
 extern uint32_t profile_insn_start;
 extern uint32_t profile_insn_init;

@@ -1,5 +1,32 @@
+#define _GNU_SOURCE
+
 #include "pp.h"
 #include <limits.h>
+#include <signal.h>
+#include <sys/ucontext.h>
+#include <unistd.h>
+
+static void segv_handler(int sig, siginfo_t *info, void *context) {
+    ucontext_t *uc = (ucontext_t *)context;
+    unsigned long *g = uc->uc_mcontext.__gregs;
+
+    fprintf(stderr,
+            "pp: SIGSEGV pc=0x%lx fault=0x%lx sp=0x%lx gp=0x%lx "
+            "ra=0x%lx a0=0x%lx a4=0x%lx a5=0x%lx t6=0x%lx\n",
+            g[REG_PC], (unsigned long)info->si_addr, g[REG_SP], g[3],
+            g[REG_RA], g[REG_A0], g[14], g[15], g[31]);
+    _exit(128 + sig);
+}
+
+static void install_signal_handlers(void) {
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = segv_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+}
 
 __attribute__((noinline)) void run(long *min1, long *min2) {
     unsigned long result1 = 0, result2 = 0;
@@ -41,6 +68,8 @@ int read_insns_from_file(FILE* file){
 }
 
 int main(int argc, char *argv[]) {
+    install_signal_handlers();
+
     // check the number of arguments
     if (argc != 3){
         fprintf(stderr, "Usage: %s xxx.init xxx.code\n", argv[0]);
@@ -114,10 +143,9 @@ int main(int argc, char *argv[]) {
 
     printf("\n");
 
+    init_fpu();
     ENABLE_FPU
 //    ENABLE_VPU
-
-//    init_fpu();
     unsigned long minN = LONG_MAX, min0 = LONG_MAX;
     for (int i = 0; i < 100; i++){
         run(&minN,&min0);
