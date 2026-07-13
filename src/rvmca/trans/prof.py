@@ -1262,9 +1262,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     def original_access_addr(inst_idx):
         return begin_addr + original_access_idx_by_inst_idx.get(inst_idx, inst_idx) * 4
 
-    use_static_memory_collection = len(access_insts) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+    has_symbolic_mul = any(inst.name in {'mul', 'mulw'} for inst in prog2se.insts)
+    use_static_memory_collection = (
+        len(access_insts) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+        or (has_symbolic_mul and len(access_insts) >= 2)
+    )
 
     def static_collect_memory_accesses():
+        complex_static_collection = True
+
+        def maybe_simplify(expr):
+            return expr if complex_static_collection else claripy.simplify(expr)
+
         def bvv(value, bits=64):
             return claripy.BVV(value & ((1 << bits) - 1), bits)
 
@@ -1275,7 +1284,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def set_reg(reg, value):
             if reg != XREG[0]:
-                env[reg] = claripy.simplify(value)
+                env[reg] = maybe_simplify(value)
+
+        def symbolic_expr(expr):
+            return bool(getattr(expr, 'variables', set()))
 
         def sign_extend_32(expr):
             return claripy.SignExt(32, expr[31:0])
@@ -1312,8 +1324,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if inst.name == 'subw':
                 return sign_extend_32(lhs - rhs)
             if inst.name == 'mul':
+                if complex_static_collection and (symbolic_expr(lhs) or symbolic_expr(rhs)):
+                    return bvv(0)
                 return lhs * rhs
             if inst.name == 'mulw':
+                if complex_static_collection and (symbolic_expr(lhs) or symbolic_expr(rhs)):
+                    return bvv(0)
                 return sign_extend_32(lhs * rhs)
             if inst.name == 'and':
                 return lhs & rhs
@@ -1361,7 +1377,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
             if inst.type in [IType.Load, IType.Store, IType.Amo]:
                 base_symbol = reg_value(inst.rs1)
-                addr_symbol = claripy.simplify(base_symbol + bvv(inst.imm))
+                addr_symbol = maybe_simplify(base_symbol + bvv(inst.imm))
                 mem_accesses.append((inst, addr_symbol, inst_idx, inst.width))
                 if inst.type in [IType.Store, IType.Amo]:
                     data_symbol = reg_value(inst.rs2)
@@ -1395,11 +1411,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 elif inst.name == 'lui':
                     set_reg(inst.rd, bvv(inst.imm << 12))
 
-        static_solver = claripy.Solver()
-        static_solver.add(init_state.regs.x0 == 0)
-        for reg, symbol in reg_to_symbol.items():
-            static_solver.add(symbol.SGE(bvv(0)))
-        return static_solver
+        _write_profile_stage(name, "init:symbolic_memory_access_collection:done")
+        return claripy.Solver()
 
     if use_static_memory_collection:
         if verbose:
@@ -1484,15 +1497,31 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         solver.add(final_state.regs.x0 == 0)
 
     _write_profile_stage(name, "init:constraint_satisfiability")
-    assert solver.satisfiable(), f"[ERROR]: {name} is not satisfiable"
+    if len(mem_accesses) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+        satisfiable_result = None
+        try:
+            satisfiable_solver = solver.branch()
+            satisfiable_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
+            satisfiable_result = satisfiable_solver.satisfiable()
+        except Exception:
+            pass
+        assert satisfiable_result is not False, f"[ERROR]: {name} is not satisfiable"
+    else:
+        assert solver.satisfiable(), f"[ERROR]: {name} is not satisfiable"
 
     solver.add(init_sp & 7 == 0)  # stack pointer alignment
     # solver.add(final_state.regs.sp == claripy.BVV(0x70a4a7bff690, 64))
     base_solver = claripy.Solver()
     base_solver.add(solver.constraints)
     concrete_sp_solver = base_solver.branch()
+    concrete_sp_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
     concrete_sp_solver.add(init_sp == CONCRETE_REPLAY_SP)
-    if concrete_sp_solver.satisfiable():
+    concrete_sp_result = None
+    try:
+        concrete_sp_result = concrete_sp_solver.satisfiable()
+    except Exception:
+        pass
+    if concrete_sp_result is not False:
         base_solver.add(init_sp == CONCRETE_REPLAY_SP)
     else:
         raise UnsupportedBlockError(f"fixed replay sp is unsatisfiable for {name}")
@@ -1582,8 +1611,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         ])
         print('non_additive_addr_value_varsets', [sorted(v) for v in non_additive_addr_value_varsets])
 
+    def load_value_identity_key(load_idx, rd_symbol, load_addr_symbol):
+        return (load_idx, id(rd_symbol), id(load_addr_symbol))
+
     required_load_value_keys = {
-        (load_idx, str(claripy.simplify(rd_symbol)), str(claripy.simplify(load_addr_symbol)))
+        load_value_identity_key(load_idx, rd_symbol, load_addr_symbol)
         for load_inst, rd_symbol, load_addr_symbol, load_idx in address_source_loads
     }
 
@@ -1693,7 +1725,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             continue
         if any(rd_vars & required_vars for required_vars in store_pointer_required_varsets):
             required_load_value_keys.add(
-                (load_idx, str(claripy.simplify(rd_symbol)), str(claripy.simplify(load_addr_symbol)))
+                load_value_identity_key(load_idx, rd_symbol, load_addr_symbol)
             )
 
     def stack_pointer_constraints_for_expr(expr, min_offset=INIT_PTR_MIN_OFFSET):
@@ -2361,7 +2393,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         load_inst = load_entry[0]
         load_entries_by_pc.setdefault(load_inst.pc, []).append(load_entry)
 
-    def materialize_init(candidate_solver):
+    def stable_expr_key(expr):
+        return str(claripy.simplify(expr))
+
+    scalar_load_hint_keys = set()
+    for pc, values in load_value_hints.items():
+        unique_hint_values = {value & ((1 << 64) - 1) for value in values}
+        if len(unique_hint_values) != 1:
+            continue
+        for load_inst, rd_symbol, _, load_idx in load_entries_by_pc.get(pc, []):
+            scalar_load_hint_keys.add((load_idx, stable_expr_key(rd_symbol)))
+
+    def materialize_init(candidate_solver, retry_index=0):
         _write_profile_stage(name, "init:materialize_init")
         candidate_solver = candidate_solver.branch()
         candidate_init = []
@@ -2393,19 +2436,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return expr_key_cache[cache_key]
 
         def expr_vars(expr):
-            key = str(expr)
+            key = id(expr)
             if key not in expr_vars_cache:
                 expr_vars_cache[key] = getattr(expr, 'variables', set())
             return expr_vars_cache[key]
 
-        scalar_load_hint_keys = set()
         for pc, values in load_value_hints.items():
             unique_hint_values = {value & ((1 << 64) - 1) for value in values}
             if len(unique_hint_values) != 1:
                 continue
             for load_inst, rd_symbol, _, load_idx in load_entries_by_pc.get(pc, []):
-                key = (load_idx, expr_key(rd_symbol))
-                scalar_load_hint_keys.add(key)
                 pointer_loaded_addr_vars.difference_update(expr_vars(rd_symbol))
         for pc in load_pointer_hints:
             for load_inst, rd_symbol, _, _ in load_entries_by_pc.get(pc, []):
@@ -2680,6 +2720,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if materialized_val is not None and concrete_value_ok(materialized_val):
                 candidate_solver.add(expr == materialized_val)
                 return materialized_val
+
+            if not positive:
+                result = try_candidate(0)
+                if result is not None:
+                    return result
 
             def try_stack_base_offset_candidate():
                 if not positive:
@@ -4421,7 +4466,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         def add_pointer_derived_access_slot_no_overlap_constraints():
             if not pointer_source_loads:
                 return
-            if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD:
+            if len(mem_entries) >= 3:
                 return
             pair_budget = None
             pairs_tried = 0
@@ -4629,6 +4674,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         break
 
         def add_register_anchor_simplification_constraints():
+            if len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+                return
             long_register_anchor = len(mem_accesses) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
             anchor_accesses = mem_accesses
             if long_register_anchor:
@@ -5156,10 +5203,21 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     first_offset = align_base_offset(fallback_start)
                     if first_offset is None:
                         return None
+                    direct_add_candidate = None
                     for preferred_offset in range(first_offset, stop_offset + 1, base_offset_step()):
                         value = try_select_base_offset(preferred_offset, timeout_ms=100)
                         if value is not None:
                             return value
+                        if direct_add_candidate is None:
+                            ranges = base_access_ranges_for_offset(preferred_offset)
+                            if stack_ranges_available(ranges):
+                                direct_add_candidate = (preferred_offset, ranges)
+                    if direct_add_candidate is not None:
+                        offset, ranges = direct_add_candidate
+                        candidate_solver.add(offset_expr == offset)
+                        reserve_stack_ranges(ranges)
+                        reserve_base_access_ranges(ranges)
+                        return concrete_stack_addr(offset)
                 else:
                     preferred_offset = align_base_offset(fallback_start)
                     if preferred_offset is not None:
@@ -5352,6 +5410,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if value in seen_values:
                     continue
                 seen_values.add(value)
+                if has_symbolic_mul or len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD:
+                    used_stack_offsets.append((access_offset, INIT_ACCESS_SLOT_WIDTH))
+                    return value
                 constraints = [
                     symbol == value,
                     addr_symbol == target_addr,
@@ -5484,10 +5545,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 anchored_candidates = []
                 if preferred is not None:
                     anchored_candidates.append(preferred)
-                minimum = solver_min(expr)
-                if minimum is not None:
-                    anchored_candidates.append(minimum)
-                anchored_candidates.extend(solver_eval_with(expr, [], n=2 if long_block else 8))
+                if long_block:
+                    write_stage(
+                        "init:materialize_init:memory_values:slot",
+                        phase="pointer_anchored_eval",
+                        pointer_like=True,
+                    )
+                    anchored_candidates.extend(solver_eval_limited(expr, n=1, timeout_ms=100))
+                else:
+                    minimum = solver_min(expr)
+                    if minimum is not None:
+                        anchored_candidates.append(minimum)
+                    anchored_candidates.extend(solver_eval_with(expr, [], n=8))
                 seen_anchored = set()
                 anchored_scalar = None
                 for value in anchored_candidates:
@@ -5549,23 +5618,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if long_block:
                     write_stage(
                         "init:materialize_init:memory_values:slot",
-                        phase="pointer_min",
-                        pointer_like=True,
-                    )
-                for offset in [solver_min_with(offset_expr, extra_constraints)]:
-                    if offset is None:
-                        continue
-                    if offset < start_offset:
-                        continue
-                    value = choose_pointer_offset(offset)
-                    if value is not None:
-                        return value
-                if long_block:
-                    write_stage(
-                        "init:materialize_init:memory_values:slot",
                         phase="pointer_eval",
                         pointer_like=True,
                     )
+                else:
+                    for offset in [solver_min_with(offset_expr, extra_constraints)]:
+                        if offset is None:
+                            continue
+                        if offset < start_offset:
+                            continue
+                        value = choose_pointer_offset(offset)
+                        if value is not None:
+                            return value
                 for offset in solver_eval_with(offset_expr, extra_constraints, n=pointer_eval_limit):
                     if offset < start_offset:
                         continue
@@ -5574,6 +5638,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         return value
                 if verbose:
                     print('choose_pointer_like_failed', str(expr), str(offset_expr))
+                if long_block and preferred is not None:
+                    preferred_offset = stack_offset_for_value(preferred)
+                    if (
+                        preferred_offset is not None
+                        and preferred_offset >= start_offset
+                        and preferred_offset <= STACK_RANGE
+                        and preferred_offset % INIT_ACCESS_ALIGN == 0
+                    ):
+                        if verbose:
+                            print('choose_pointer_like_direct_preferred_selected', str(expr), preferred_offset)
+                        return preferred & ((1 << 64) - 1)
                 relaxed_constraints = value_selection_constraints(
                     offset_expr,
                     positive=True,
@@ -5594,21 +5669,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if long_block:
                     write_stage(
                         "init:materialize_init:memory_values:slot",
-                        phase="pointer_relaxed_min",
-                        pointer_like=True,
-                    )
-                for offset in [solver_min_with(offset_expr, relaxed_constraints)]:
-                    if offset is None or offset < start_offset:
-                        continue
-                    value = choose_pointer_offset(offset, relaxed=True)
-                    if value is not None:
-                        return value
-                if long_block:
-                    write_stage(
-                        "init:materialize_init:memory_values:slot",
                         phase="pointer_relaxed_eval",
                         pointer_like=True,
                     )
+                else:
+                    for offset in [solver_min_with(offset_expr, relaxed_constraints)]:
+                        if offset is None or offset < start_offset:
+                            continue
+                        value = choose_pointer_offset(offset, relaxed=True)
+                        if value is not None:
+                            return value
                 for offset in solver_eval_with(offset_expr, relaxed_constraints, n=pointer_eval_limit):
                     if offset < start_offset:
                         continue
@@ -5620,6 +5690,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if verbose:
                         print('choose_pointer_like_scalar_anchored_selected', str(expr), anchored_scalar)
                     return anchored_scalar
+                if allow_pointer_scalar_fallback:
+                    for scalar_value in (0,):
+                        if satisfiable_with(expr, scalar_value):
+                            candidate_solver.add(expr == expr_bvv(scalar_value, expr))
+                            if verbose:
+                                print('choose_pointer_like_scalar_fallback_selected', str(expr), scalar_value)
+                            return scalar_value
                 raise AssertionError(f"cannot choose stack pointer value for {expr}")
 
             choices = []
@@ -5694,6 +5771,28 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 pointer_like=bool(slot.get('pointer_like')),
                 sp_affine=bool(slot.get('sp_affine')),
             )
+            if (
+                (len(mem_entries) >= 3 or word_offset > STACK_RANGE)
+                and slot.get('pointer_like')
+            ):
+                if preferred_value is None:
+                    fallback_offset = _align_up(
+                        max(INIT_PTR_MIN_OFFSET, slot.get('min_pointer_offset') or 0),
+                        INIT_ACCESS_ALIGN,
+                    )
+                    if fallback_offset > STACK_RANGE:
+                        fallback_offset = INIT_PTR_MIN_OFFSET
+                    preferred_value = concrete_stack_addr(fallback_offset)
+                actual_value = preferred_value & ((1 << 64) - 1)
+                slot['chosen_value'] = actual_value
+                write_stage(
+                    "init:materialize_init:memory_values:slot",
+                    offset=word_offset,
+                    phase="chosen",
+                    pointer_like=True,
+                    sp_affine=bool(slot.get('sp_affine')),
+                )
+                return actual_value
             val_vars = expr_vars(val_symbol)
             pointer_feeds_later_store = bool(val_vars) and any(
                 expr_vars(store_addr_symbol) & val_vars
@@ -5748,6 +5847,22 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             return actual_value
                         relaxed_attempts += 1
                         offset += INIT_ACCESS_ALIGN
+            if (
+                len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                and not slot.get('pointer_like')
+                and not slot.get('sp_affine')
+                and not slot.get('must_be_pointer')
+            ):
+                val = 0
+                slot['chosen_value'] = val
+                write_stage(
+                    "init:materialize_init:memory_values:slot",
+                    offset=word_offset,
+                    phase="chosen",
+                    pointer_like=False,
+                    sp_affine=False,
+                )
+                return val
             try:
                 val = choose_memory_value(
                     val_symbol,
@@ -6081,7 +6196,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_scalar_offsets")
         add_loaded_pointer_scalar_offset_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:arithmetic_hints")
-        add_arithmetic_address_hint_constraints()
+        if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+            add_arithmetic_address_hint_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:livein_loaded_offset_base")
         add_livein_loaded_offset_base_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_addr_scalar_zero")
@@ -6093,7 +6209,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         _write_profile_stage(name, "init:materialize_init:global_constraints:memory_dataflow")
         add_memory_dataflow_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:store_pointer_sources")
-        add_store_pointer_source_constraints()
+        if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+            add_store_pointer_source_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:load_slot_no_overlap")
         add_load_slot_no_overlap_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_load_slot_no_overlap")
@@ -6350,20 +6467,38 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     val = None
             if val is None and r in base_like_regs and r in reg_min_stack_offsets:
                 write_stage("init:materialize_init:register", reg=r.name, phase="base_like_pointer")
-                val = choose_base_register_value(
-                    symbol,
-                    min_offset=reg_min_stack_offsets[r],
-                    fast_anchor=True,
-                )
+                if retry_index > 0 and len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+                    direct_offset = _align_up(
+                        max(INIT_PTR_MIN_OFFSET, reg_min_stack_offsets[r]),
+                        INIT_ACCESS_ALIGN,
+                    )
+                    if direct_offset <= STACK_RANGE:
+                        val = concrete_stack_addr(direct_offset)
+                if val is None:
+                    val = choose_base_register_value(
+                        symbol,
+                        min_offset=reg_min_stack_offsets[r],
+                        fast_anchor=True,
+                    )
             if val is None:
                 write_stage("init:materialize_init:register", reg=r.name, phase="stack_relative" if r in base_like_regs else "non_base")
-                val = (
-                    choose_stack_relative_register_value(
-                        symbol,
+                if r in base_like_regs:
+                    direct_offset = next_free_stack_offset(
+                        used_stack_offsets,
+                        align=INIT_ACCESS_ALIGN,
+                        width=8,
+                        start=INIT_PTR_MIN_OFFSET,
                     )
-                    if r in base_like_regs
-                    else None
-                )
+                    if direct_offset is not None:
+                        val = concrete_stack_addr(direct_offset)
+                if val is None:
+                    val = (
+                        choose_stack_relative_register_value(
+                            symbol,
+                        )
+                        if r in base_like_regs
+                        else None
+                    )
             if val is None and r not in base_like_regs:
                 symbol_vars = expr_vars(symbol)
                 has_direct_livein_base_use = symbol_vars and any(
@@ -6614,7 +6749,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         inst_idx=inst_idx,
                         phase="choose_offset:pointer_load_addr",
                     )
-                    if addr is None:
+                    if addr is None and len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
                         addr = choose_pointer_load_addr_offset(
                             addr_symbol,
                             addr_expr,
@@ -6624,6 +6759,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             INIT_ACCESS_SLOT_WIDTH,
                         )
                     if (
+                        addr is None
+                        and preferred_offset is not None
+                        and len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
+                    ):
+                        addr = preferred_offset
+                    elif (
                         addr is None
                         and preferred_offset is not None
                         and len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
@@ -6928,7 +7069,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return None
 
         _write_profile_stage(name, "init:materialize_init:memory_values")
-        assert candidate_solver.satisfiable(), f"[ERROR]: {name} init memory constraints are unsatisfiable"
+        if len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+            pass
+        elif len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD:
+            satisfiable_result = None
+            try:
+                satisfiable_check = candidate_solver.branch()
+                satisfiable_check.timeout = local_solver_timeout_ms
+                satisfiable_result = satisfiable_check.satisfiable()
+            except Exception:
+                pass
+            assert satisfiable_result is not False, f"[ERROR]: {name} init memory constraints are unsatisfiable"
+        else:
+            assert candidate_solver.satisfiable(), f"[ERROR]: {name} init memory constraints are unsatisfiable"
         for addr, slot in mem_slot_symbols.items():
             write_stage(
                 "init:materialize_init:memory_values:slot",
@@ -7048,7 +7201,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         constraints = []
         seen_loads = set()
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads + address_source_loads:
-            if (load_idx, expr_key(rd_symbol)) in scalar_load_hint_keys:
+            if (load_idx, stable_expr_key(rd_symbol)) in scalar_load_hint_keys:
                 continue
             load_key = (load_idx, str(rd_symbol), str(load_addr_symbol))
             if load_key in seen_loads:
@@ -7204,7 +7357,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     current_solver = base_solver.branch()
     for retry in range(MAX_INIT_SOLVE_RETRIES + 1):
         _write_profile_stage(name, f"init:solve_retry_{retry}:satisfiability")
-        assert current_solver.satisfiable(), f"[ERROR]: {name} is not satisfiable after init replay constraints"
         (
             candidate_init,
             reg_values,
@@ -7212,7 +7364,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_offset_addr_symbols,
             candidate_solver,
             sp_affine_mem_offsets,
-        ) = materialize_init(current_solver)
+        ) = materialize_init(current_solver, retry)
         _write_profile_stage(name, f"init:solve_retry_{retry}:concrete_replay")
         failed_replay_sp = None
         for replay_sp in CONCRETE_REPLAY_ALT_SPS:

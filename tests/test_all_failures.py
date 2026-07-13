@@ -106,7 +106,7 @@ def _run_single_block_uncapped(block_id: str, asm_raw: str, verbose: bool = Fals
     out_prefix = OUTPUT_PATH / f"batch_{safe_id}"
 
     tmp_asm.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in [".error", ".init", ".code"]:
+    for suffix in [".error", ".init", ".code", ".stage.json"]:
         stale = Path(str(out_prefix) + suffix)
         if stale.exists():
             stale.unlink()
