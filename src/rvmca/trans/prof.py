@@ -273,7 +273,7 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
     for inst in prog.insts:
         if inst.type in [IType.Load, IType.Store, IType.Amo]:
             addr = inst.get_addr()
-            imm = inst.imm
+            imm = _signed_u64(inst.imm)
             # temp = base + offset
             insts.append(UFmtInst('li', temp, abs(imm)))
             if imm >= 0:
@@ -1534,6 +1534,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             extra_undef_vars.append(reg)
 
     mem_entries = list(load_accesses)
+
     undef_base_vars = set()
     for base_reg in undef_base_regs:
         if base_reg in reg_to_symbol:
@@ -2397,12 +2398,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         return str(claripy.simplify(expr))
 
     scalar_load_hint_keys = set()
+    scalar_zero_address_load_keys = set()
     for pc, values in load_value_hints.items():
         unique_hint_values = {value & ((1 << 64) - 1) for value in values}
         if len(unique_hint_values) != 1:
             continue
+        hinted_value = next(iter(unique_hint_values))
         for load_inst, rd_symbol, _, load_idx in load_entries_by_pc.get(pc, []):
-            scalar_load_hint_keys.add((load_idx, stable_expr_key(rd_symbol)))
+            load_key = (load_idx, stable_expr_key(rd_symbol))
+            scalar_load_hint_keys.add(load_key)
+            rd_vars = getattr(rd_symbol, 'variables', set())
+            used_in_later_addr = bool(rd_vars) and any(
+                access_idx > load_idx and (getattr(addr_symbol, 'variables', set()) & rd_vars)
+                for _, addr_symbol, access_idx, _ in mem_accesses
+            )
+            if hinted_value == 0 and load_inst.width < 8 and used_in_later_addr:
+                scalar_zero_address_load_keys.add(load_key)
+
+    for load_inst, rd_symbol, _, load_idx in address_source_loads:
+        if load_inst.width >= 8 or load_inst.pc in load_nonzero_hints:
+            continue
+        scalar_zero_address_load_keys.add((load_idx, stable_expr_key(rd_symbol)))
 
     def materialize_init(candidate_solver, retry_index=0):
         _write_profile_stage(name, "init:materialize_init")
@@ -2440,6 +2456,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if key not in expr_vars_cache:
                 expr_vars_cache[key] = getattr(expr, 'variables', set())
             return expr_vars_cache[key]
+
+        def is_scalar_zero_address_load(load_inst, rd_symbol, load_idx):
+            if (load_idx, expr_key(rd_symbol)) in scalar_zero_address_load_keys:
+                return True
+            if load_inst.width >= 8 or load_inst.pc in load_nonzero_hints:
+                return False
+            rd_vars = expr_vars(rd_symbol)
+            return bool(rd_vars) and any(
+                access_idx > load_idx and (expr_vars(addr_symbol) & rd_vars)
+                for _, addr_symbol, access_idx, _ in mem_accesses
+            )
 
         for pc, values in load_value_hints.items():
             unique_hint_values = {value & ((1 << 64) - 1) for value in values}
@@ -4056,7 +4083,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if len(values) != 1:
                     continue
                 for load_inst, rd_symbol, _, load_idx in load_entries_by_pc.get(pc, []):
-                    try_add_constraint(rd_symbol == expr_bvv(values[0], rd_symbol), timeout_ms=hint_timeout_ms)
+                    constraint = rd_symbol == expr_bvv(values[0], rd_symbol)
+                    if (load_idx, expr_key(rd_symbol)) in scalar_zero_address_load_keys:
+                        if not try_add_constraint(constraint, timeout_ms=hint_timeout_ms):
+                            candidate_solver.add(constraint)
+                            added_constraint_cache.add(str(claripy.simplify(constraint)))
+                    else:
+                        try_add_constraint(constraint, timeout_ms=hint_timeout_ms)
 
             pointer_hints_tried = 0
             for pc, min_offset in load_pointer_hints.items():
@@ -4102,6 +4135,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 symbol = reg_to_symbol[reg]
                 try_add_constraint(symbol != expr_bvv(0, symbol), timeout_ms=hint_timeout_ms)
+
+        def add_scalar_zero_address_load_constraints():
+            for load_inst, rd_symbol, _, load_idx in mem_entries:
+                if not is_scalar_zero_address_load(load_inst, rd_symbol, load_idx):
+                    continue
+                constraint = rd_symbol == expr_bvv(0, rd_symbol)
+                if not try_add_constraint(constraint, timeout_ms=local_solver_timeout_ms):
+                    candidate_solver.add(constraint)
+                    added_constraint_cache.add(str(claripy.simplify(constraint)))
 
         def add_store_pointer_source_constraints():
             for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads:
@@ -4405,6 +4447,47 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         continue
                     try_add_constraint(symbolic_init_slots_no_overlap(addr_a, addr_b))
 
+        def add_pointer_scalar_load_slot_no_overlap_constraints():
+            if len(mem_entries) >= 32:
+                return
+            pointer_entries = []
+            scalar_entries = []
+            for load_inst, rd_symbol, addr_symbol, load_idx in mem_entries:
+                if has_prior_same_addr_store(addr_symbol, load_idx, allow_solver=False):
+                    continue
+                if is_scalar_zero_address_load(load_inst, rd_symbol, load_idx):
+                    scalar_entries.append((load_inst, addr_symbol, load_idx))
+                    continue
+                if load_inst.width != 8:
+                    continue
+                rd_vars = expr_vars(rd_symbol)
+                if not rd_vars:
+                    continue
+                if (rd_vars & pointer_loaded_addr_vars) or (load_idx, expr_key(rd_symbol)) in hint_pointer_load_keys:
+                    pointer_entries.append((load_inst, addr_symbol, load_idx))
+
+            pair_budget = 128
+            pairs_tried = 0
+            for pointer_inst, pointer_addr, pointer_idx in pointer_entries:
+                for scalar_inst, scalar_addr, scalar_idx in scalar_entries:
+                    if pointer_idx == scalar_idx:
+                        continue
+                    if pairs_tried >= pair_budget:
+                        return
+                    if same_address(pointer_addr, scalar_addr, allow_solver=False):
+                        continue
+                    if affine_accesses_disjoint(
+                        pointer_addr,
+                        init_slot_width(pointer_inst.width),
+                        scalar_addr,
+                        INIT_ACCESS_SLOT_WIDTH,
+                    ):
+                        continue
+                    pairs_tried += 1
+                    constraint = symbolic_init_slots_no_overlap(pointer_addr, scalar_addr)
+                    if not try_add_constraint(constraint):
+                        candidate_solver.add(constraint)
+                        added_constraint_cache.add(str(claripy.simplify(constraint)))
         def add_pointer_load_slot_no_overlap_constraints():
             if len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
                 return
@@ -5219,18 +5302,25 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         reserve_base_access_ranges(ranges)
                         return concrete_stack_addr(offset)
                 else:
-                    preferred_offset = align_base_offset(fallback_start)
-                    if preferred_offset is not None:
+                    first_offset = align_base_offset(fallback_start)
+                    if first_offset is None:
+                        return None
+                    stop_offset = min(STACK_RANGE, first_offset + 512)
+                    direct_add_candidate = None
+                    for preferred_offset in range(first_offset, stop_offset + 1, base_offset_step()):
                         value = try_select_base_offset(preferred_offset)
                         if value is not None:
                             return value
-                    if (
-                        preferred_offset != fallback_start
-                    ):
-                        fallback_aligned = align_base_offset(fallback_start)
-                        value = None if fallback_aligned is None else try_select_base_offset(fallback_aligned)
-                        if value is not None:
-                            return value
+                        if direct_add_candidate is None:
+                            ranges = base_access_ranges_for_offset(preferred_offset)
+                            if stack_ranges_available(ranges):
+                                direct_add_candidate = (preferred_offset, ranges)
+                    if direct_add_candidate is not None:
+                        offset, ranges = direct_add_candidate
+                        candidate_solver.add(offset_expr == offset)
+                        reserve_stack_ranges(ranges)
+                        reserve_base_access_ranges(ranges)
+                        return concrete_stack_addr(offset)
                 return None
             first_offset = align_base_offset(fallback_start)
             if first_offset is None:
@@ -5784,15 +5874,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         fallback_offset = INIT_PTR_MIN_OFFSET
                     preferred_value = concrete_stack_addr(fallback_offset)
                 actual_value = preferred_value & ((1 << 64) - 1)
-                slot['chosen_value'] = actual_value
-                write_stage(
-                    "init:materialize_init:memory_values:slot",
-                    offset=word_offset,
-                    phase="chosen",
-                    pointer_like=True,
-                    sp_affine=bool(slot.get('sp_affine')),
-                )
-                return actual_value
+                if try_add_constraint_set_fast(
+                    [val_symbol == expr_bvv(actual_value, val_symbol)],
+                    timeout_ms=local_solver_timeout_ms,
+                ):
+                    slot['chosen_value'] = actual_value
+                    write_stage(
+                        "init:materialize_init:memory_values:slot",
+                        offset=word_offset,
+                        phase="chosen",
+                        pointer_like=True,
+                        sp_affine=bool(slot.get('sp_affine')),
+                    )
+                    return actual_value
             val_vars = expr_vars(val_symbol)
             pointer_feeds_later_store = bool(val_vars) and any(
                 expr_vars(store_addr_symbol) & val_vars
@@ -5847,6 +5941,24 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             return actual_value
                         relaxed_attempts += 1
                         offset += INIT_ACCESS_ALIGN
+            if (
+                slot.get('scalar_zero')
+                and not slot.get('pointer_like')
+                and not slot.get('sp_affine')
+                and not slot.get('must_be_pointer')
+            ):
+                zero_constraint = val_symbol == expr_bvv(0, val_symbol)
+                if try_add_constraint_set_fast([zero_constraint], timeout_ms=local_solver_timeout_ms):
+                    val = 0
+                    slot['chosen_value'] = val
+                    write_stage(
+                        "init:materialize_init:memory_values:slot",
+                        offset=word_offset,
+                        phase="chosen",
+                        pointer_like=False,
+                        sp_affine=False,
+                    )
+                    return val
             if (
                 len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                 and not slot.get('pointer_like')
@@ -6198,12 +6310,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         _write_profile_stage(name, "init:materialize_init:global_constraints:arithmetic_hints")
         if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
             add_arithmetic_address_hint_constraints()
+        _write_profile_stage(name, "init:materialize_init:global_constraints:scalar_zero_address_loads")
+        add_scalar_zero_address_load_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:livein_loaded_offset_base")
         add_livein_loaded_offset_base_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_addr_scalar_zero")
         add_loaded_address_scalar_zero_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:direct_loaded_pointer_stack")
         add_direct_loaded_pointer_stack_constraints()
+        _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_scalar_load_slot_no_overlap")
+        add_pointer_scalar_load_slot_no_overlap_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:access_range")
         add_access_range_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:memory_dataflow")
@@ -6321,6 +6437,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if reg in base_like_regs:
                 continue
 
+        direct_memory_base_like_regs = set()
+        for reg in reg_to_symbol:
+            for inst, addr_symbol, _, _ in mem_accesses:
+                if getattr(inst, 'rs1', None) != reg:
+                    continue
+                direct_memory_base_like_regs.add(reg)
+                break
+
         loaded_pointer_scalar_regs = set()
         pointer_nonlinear_scalar_regs = set()
         for reg, symbol in reg_to_symbol.items():
@@ -6407,15 +6531,23 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     break
 
         for reg in loaded_pointer_scalar_regs:
+            if reg in direct_memory_base_like_regs:
+                continue
             base_like_regs.discard(reg)
             reg_min_stack_offsets.pop(reg, None)
         for reg in pointer_nonlinear_scalar_regs:
+            if reg in direct_memory_base_like_regs:
+                continue
             base_like_regs.discard(reg)
             reg_min_stack_offsets.pop(reg, None)
         for reg in fixed_reg_value_hints:
+            if reg in direct_memory_base_like_regs:
+                continue
             base_like_regs.discard(reg)
             reg_min_stack_offsets.pop(reg, None)
         for reg in scalar_hint_regs:
+            if reg in direct_memory_base_like_regs:
+                continue
             base_like_regs.discard(reg)
             reg_min_stack_offsets.pop(reg, None)
 
@@ -6459,7 +6591,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             write_stage("init:materialize_init:register", reg=r.name, phase="start")
             hinted_values = sorted({value & ((1 << 64) - 1) for value in reg_value_hints.get(r, [])})
             val = None
-            if len(hinted_values) == 1:
+            if len(hinted_values) == 1 and r not in direct_memory_base_like_regs:
                 write_stage("init:materialize_init:register", reg=r.name, phase="value_hint")
                 try:
                     val = choose_register_value(symbol, hinted_values[0])
@@ -6659,9 +6791,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
         )
         for load_slot_idx, (inst, rd_symbol, addr_symbol, inst_idx) in load_slot_entries:
+            rd_vars_for_prune = expr_vars(rd_symbol)
+            value_used_later_for_prune = bool(rd_vars_for_prune) and any(
+                later_idx > inst_idx and (expr_vars(later_addr_symbol) & rd_vars_for_prune)
+                for _, later_addr_symbol, later_idx, _ in mem_accesses
+            )
+            load_value_key_for_prune = (inst_idx, str(claripy.simplify(rd_symbol)), str(claripy.simplify(addr_symbol)))
+            force_exact_load_slot = (
+                load_value_key_for_prune in required_load_value_keys
+                or value_used_later_for_prune
+            )
             if (
                 len(mem_entries) >= LOAD_SLOT_PRUNE_THRESHOLD
-                and (inst_idx, str(claripy.simplify(rd_symbol)), str(claripy.simplify(addr_symbol))) not in required_load_value_keys
+                and not force_exact_load_slot
             ):
                 continue
             write_stage(
@@ -6762,6 +6904,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         addr is None
                         and preferred_offset is not None
                         and len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
+                        and not force_exact_load_slot
                     ):
                         addr = preferred_offset
                     elif (
@@ -6861,6 +7004,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 for _, later_addr_symbol, later_idx, _ in mem_accesses
             )
             load_value_key = (inst_idx, str(claripy.simplify(rd_symbol)), str(claripy.simplify(addr_symbol)))
+            scalar_zero_load = is_scalar_zero_address_load(inst, value_expr, inst_idx)
+            if scalar_zero_load:
+                constraint = value_expr == expr_bvv(0, value_expr)
+                candidate_solver.add(constraint)
+                added_constraint_cache.add(str(claripy.simplify(constraint)))
             require_load_value = (
                 len(mem_entries) < STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                 or load_value_key in required_load_value_keys
@@ -6881,12 +7029,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'must_be_pointer': False,
                     'min_pointer_offset': 0,
                     'sp_affine': False,
+                    'scalar_zero': False,
                 }
                 mem_offset_addr_symbols[word_offset] = []
             else:
                 word_symbol = mem_slot_symbols[word_offset]['symbol']
 
             slot = mem_slot_symbols[word_offset]
+            if scalar_zero_load:
+                slot['scalar_zero'] = True
             if (
                 not new_word_slot
                 and 'direct_value_expr' in slot
@@ -7354,6 +7505,104 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         return constraints
 
+    def find_narrow_pointer_alias_constraints(
+        reg_values,
+        mem_values,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+    ):
+        constraints = []
+        scalar_loads = []
+        pointer_loads = []
+
+        for load_inst, rd_symbol, addr_symbol, load_idx in mem_entries:
+            rd_vars = getattr(rd_symbol, 'variables', set())
+            if not rd_vars:
+                continue
+            used_in_later_addr = any(
+                access_idx > load_idx and (getattr(later_addr, 'variables', set()) & rd_vars)
+                for _, later_addr, access_idx, _ in mem_accesses
+            )
+            if load_inst.width < 8 and load_inst.pc not in load_nonzero_hints and used_in_later_addr:
+                scalar_loads.append((load_inst, addr_symbol, load_idx))
+            elif (
+                load_inst.width == 8
+                and used_in_later_addr
+                and (
+                    rd_vars & pointer_loaded_addr_vars
+                    or load_inst.pc in load_pointer_hints
+                )
+            ):
+                pointer_loads.append((load_inst, addr_symbol, load_idx))
+
+        if not scalar_loads or not pointer_loads:
+            return constraints
+
+        concrete_addrs = {}
+
+        def concrete_load_addr(load_inst, load_idx):
+            key = load_idx
+            if key in concrete_addrs:
+                return concrete_addrs[key]
+            access_addr = original_access_addr(load_idx)
+            state = replay_prefix_state(
+                reg_values,
+                mem_values,
+                access_addr,
+                sp_value=sp_value,
+                sp_affine_mem_offsets=sp_affine_mem_offsets,
+            )
+            if state is None:
+                concrete_addrs[key] = None
+                return None
+            concrete_addr = state.solver.eval(getattr(state.regs, str(load_inst.rs1))) + load_inst.imm
+            concrete_addrs[key] = concrete_addr & ((1 << 64) - 1)
+            return concrete_addrs[key]
+
+        seen = set()
+        used_slots = set()
+        for load_inst, _, load_idx in [
+            (entry[0], entry[2], entry[3])
+            for entry in mem_entries
+        ]:
+            concrete_addr = concrete_load_addr(load_inst, load_idx)
+            if concrete_addr is None:
+                continue
+            used_slots.add(((sp_value - concrete_addr) + 7) & ~7)
+
+        def next_unused_slot(exclude_slot):
+            offset = INIT_ACCESS_ALIGN
+            while offset <= STACK_RANGE:
+                if offset != exclude_slot and offset not in used_slots:
+                    return offset
+                offset += INIT_ACCESS_ALIGN
+            return None
+
+        for pointer_inst, pointer_addr_symbol, pointer_idx in pointer_loads:
+            pointer_addr = concrete_load_addr(pointer_inst, pointer_idx)
+            if pointer_addr is None:
+                continue
+            pointer_slot = ((sp_value - pointer_addr) + 7) & ~7
+            for scalar_inst, scalar_addr_symbol, scalar_idx in scalar_loads:
+                scalar_addr = concrete_load_addr(scalar_inst, scalar_idx)
+                if scalar_addr is None:
+                    continue
+                scalar_slot = ((sp_value - scalar_addr) + 7) & ~7
+                if pointer_slot != scalar_slot:
+                    continue
+                key = (pointer_idx, scalar_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                constraints.append(symbolic_init_slots_no_overlap(pointer_addr_symbol, scalar_addr_symbol))
+                target_slot = next_unused_slot(pointer_slot)
+                if target_slot is not None:
+                    constraints.append(
+                        (init_sp - scalar_addr_symbol) == claripy.BVV(target_slot, 64)
+                    )
+
+        return constraints
+
     current_solver = base_solver.branch()
     for retry in range(MAX_INIT_SOLVE_RETRIES + 1):
         _write_profile_stage(name, f"init:solve_retry_{retry}:satisfiability")
@@ -7378,6 +7627,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 failed_replay_sp = replay_sp
                 break
         if failed_replay_sp is None:
+            pp_alias_constraints = find_narrow_pointer_alias_constraints(
+                reg_values,
+                mem_values,
+                sp_value=CONCRETE_REPLAY_SP,
+                sp_affine_mem_offsets=sp_affine_mem_offsets,
+            )
+            if pp_alias_constraints and retry < MAX_INIT_SOLVE_RETRIES:
+                for constraint in pp_alias_constraints:
+                    current_solver.add(constraint)
+                continue
             _write_profile_stage(name, "init:done")
             return candidate_init
 
