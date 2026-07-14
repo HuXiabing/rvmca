@@ -2444,6 +2444,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         equiv_parent = {}
         hint_pointer_load_keys = set()
         register_anchor_min_offsets = {}
+        residual_scalar_regs = set()
         local_solver_timeout_ms = 100 if len(mem_accesses) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD else HEURISTIC_SOLVER_TIMEOUT_MS
         def expr_key(expr):
             cache_key = id(expr)
@@ -2674,24 +2675,47 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         def concrete_value_from_materialized(expr):
             if not expr_vars(expr):
                 return concrete_expr_value(expr)
-            substituted = expr
+            substitutions = {}
             for reg, value in reg_values.items():
                 symbol = reg_to_symbol.get(reg)
                 if symbol is None:
                     continue
-                if not (expr_vars(substituted) & expr_vars(symbol)):
-                    continue
-                substituted = claripy.replace(
-                    substituted,
-                    symbol,
-                    claripy.BVV(value & ((1 << symbol.size()) - 1), symbol.size()),
+                substitutions[expr_key(symbol)] = claripy.BVV(
+                    value & ((1 << symbol.size()) - 1),
+                    symbol.size(),
                 )
-            if expr_vars(substituted) & expr_vars(init_sp):
-                substituted = claripy.replace(
-                    substituted,
-                    init_sp,
-                    claripy.BVV(CONCRETE_REPLAY_SP & ((1 << init_sp.size()) - 1), init_sp.size()),
-                )
+            substitutions[expr_key(init_sp)] = claripy.BVV(
+                CONCRETE_REPLAY_SP & ((1 << init_sp.size()) - 1),
+                init_sp.size(),
+            )
+
+            cache = {}
+
+            def substitute(node):
+                if not hasattr(node, 'op'):
+                    return node
+                node_key = expr_key(node)
+                if node_key in substitutions:
+                    return substitutions[node_key]
+                cache_key = id(node)
+                if cache_key in cache:
+                    return cache[cache_key]
+                changed = False
+                new_args = []
+                for arg in getattr(node, 'args', ()):
+                    new_arg = substitute(arg)
+                    if new_arg is not arg:
+                        changed = True
+                    new_args.append(new_arg)
+                if changed:
+                    result = node.make_like(node.op, tuple(new_args))
+                    result = claripy.simplify(result)
+                else:
+                    result = node
+                cache[cache_key] = result
+                return result
+
+            substituted = substitute(expr)
             if expr_vars(substituted):
                 return None
             return concrete_expr_value(claripy.simplify(substituted))
@@ -4084,12 +4108,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 for load_inst, rd_symbol, _, load_idx in load_entries_by_pc.get(pc, []):
                     constraint = rd_symbol == expr_bvv(values[0], rd_symbol)
-                    if (load_idx, expr_key(rd_symbol)) in scalar_zero_address_load_keys:
-                        if not try_add_constraint(constraint, timeout_ms=hint_timeout_ms):
-                            candidate_solver.add(constraint)
-                            added_constraint_cache.add(str(claripy.simplify(constraint)))
-                    else:
-                        try_add_constraint(constraint, timeout_ms=hint_timeout_ms)
+                    try_add_constraint(constraint, timeout_ms=hint_timeout_ms)
 
             pointer_hints_tried = 0
             for pc, min_offset in load_pointer_hints.items():
@@ -4141,9 +4160,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if not is_scalar_zero_address_load(load_inst, rd_symbol, load_idx):
                     continue
                 constraint = rd_symbol == expr_bvv(0, rd_symbol)
-                if not try_add_constraint(constraint, timeout_ms=local_solver_timeout_ms):
-                    candidate_solver.add(constraint)
-                    added_constraint_cache.add(str(claripy.simplify(constraint)))
+                try_add_constraint(constraint, timeout_ms=local_solver_timeout_ms)
 
         def add_store_pointer_source_constraints():
             for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads:
@@ -4213,6 +4230,97 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         )
                         if try_add_constraint_set(list(residual_constraints) + stack_constraints):
                             break
+
+        def add_loaded_pointer_residual_anchor_constraints():
+            small_targets = [-4, 0, 4, 8, 16]
+            for load_inst, rd_symbol, _, load_idx in load_accesses:
+                if load_inst.width != 8:
+                    continue
+                rd_vars = expr_vars(rd_symbol)
+                if not rd_vars:
+                    continue
+                for _, addr_symbol, access_idx, width in mem_accesses:
+                    if access_idx <= load_idx:
+                        continue
+                    if not (expr_vars(addr_symbol) & rd_vars):
+                        continue
+                    residual = claripy.simplify(addr_symbol - rd_symbol)
+                    residual_vars = expr_vars(residual)
+                    if residual_vars & rd_vars:
+                        continue
+                    if not residual_vars:
+                        residual_value = concrete_expr_value(residual)
+                        if residual_value is None:
+                            continue
+                        imm = _signed_u64(residual_value)
+                        min_offset = max(min_pointer_offset_for_vars(rd_vars, load_idx), width)
+                        if imm >= 0:
+                            min_offset = max(min_offset, imm + width)
+                        min_offset = _align_up(min_offset, INIT_ACCESS_ALIGN)
+                        if try_add_constraint_set(stack_pointer_constraints_for_expr(rd_symbol, min_offset)):
+                            hint_pointer_load_keys.add((load_idx, expr_key(rd_symbol)))
+                        continue
+                    for target in small_targets:
+                        residual_constraints = constraints_to_constant(
+                            residual,
+                            target,
+                            forbidden_vars=rd_vars,
+                        )
+                        if residual_constraints is None:
+                            continue
+                        min_offset = max(min_pointer_offset_for_vars(rd_vars, load_idx), width)
+                        if target >= 0:
+                            min_offset = max(min_offset, target + width)
+                        min_offset = _align_up(min_offset, INIT_ACCESS_ALIGN)
+                        stack_constraints = stack_pointer_constraints_for_expr(rd_symbol, min_offset)
+                        if try_add_constraint_set(list(residual_constraints) + stack_constraints):
+                            hint_pointer_load_keys.add((load_idx, expr_key(rd_symbol)))
+                            for reg, symbol in reg_to_symbol.items():
+                                symbol_vars = expr_vars(symbol)
+                                if symbol_vars and (residual_vars & symbol_vars):
+                                    residual_scalar_regs.add(reg)
+                            break
+
+        def add_livein_base_residual_anchor_constraints():
+            small_targets = [0, 4, 8, 16]
+            for reg, symbol in reg_to_symbol.items():
+                symbol_vars = expr_vars(symbol)
+                if not symbol_vars:
+                    continue
+                for _, addr_symbol, _, width in mem_accesses:
+                    if not (expr_vars(addr_symbol) & symbol_vars):
+                        continue
+                    residual = claripy.simplify(addr_symbol - symbol)
+                    residual_vars = expr_vars(residual)
+                    if not residual_vars or (residual_vars & symbol_vars):
+                        continue
+                    for target in small_targets:
+                        residual_constraints = constraints_to_constant(
+                            residual,
+                            target,
+                            forbidden_vars=symbol_vars,
+                        )
+                        if residual_constraints is None:
+                            continue
+                        min_offset = max(INIT_PTR_MIN_OFFSET, width)
+                        if target >= 0:
+                            min_offset = max(min_offset, target + width)
+                        min_offset = _align_up(min_offset, INIT_ACCESS_ALIGN)
+                        stack_constraints = stack_pointer_constraints_for_expr(symbol, min_offset)
+                        if try_add_constraint_set(list(residual_constraints) + stack_constraints):
+                            register_anchor_min_offsets[reg] = max(
+                                register_anchor_min_offsets.get(reg, INIT_PTR_MIN_OFFSET),
+                                min_offset,
+                            )
+                            for other_reg, other_symbol in reg_to_symbol.items():
+                                if other_reg == reg:
+                                    continue
+                                other_vars = expr_vars(other_symbol)
+                                if other_vars and (residual_vars & other_vars):
+                                    residual_scalar_regs.add(other_reg)
+                            break
+                    if reg in register_anchor_min_offsets:
+                        break
 
         def add_loaded_address_scalar_zero_constraints():
             for reg, symbol in reg_to_symbol.items():
@@ -4401,6 +4509,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 pair_budget = None
             pairs_tried = 0
             for load_inst, _, load_addr_symbol, load_idx in load_entries:
+                if complex_memory_block:
+                    load_affine = affine_key(load_addr_symbol)
+                    if load_affine is None or ast_node_count(load_affine[2]) > 1:
+                        continue
                 for _, store_addr_symbol, store_idx, store_width, _ in store_accesses:
                     if store_idx >= load_idx:
                         continue
@@ -4450,6 +4562,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         def add_pointer_scalar_load_slot_no_overlap_constraints():
             if len(mem_entries) >= 32:
                 return
+            complex_memory_block = len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+            if complex_memory_block:
+                return
             pointer_entries = []
             scalar_entries = []
             for load_inst, rd_symbol, addr_symbol, load_idx in mem_entries:
@@ -4471,6 +4586,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             for pointer_inst, pointer_addr, pointer_idx in pointer_entries:
                 for scalar_inst, scalar_addr, scalar_idx in scalar_entries:
                     if pointer_idx == scalar_idx:
+                        continue
+                    if (
+                        complex_memory_block
+                        and (
+                            (affine_key(pointer_addr) is None and ast_node_count(pointer_addr) > 8)
+                            or (affine_key(scalar_addr) is None and ast_node_count(scalar_addr) > 8)
+                        )
+                    ):
                         continue
                     if pairs_tried >= pair_budget:
                         return
@@ -6153,92 +6276,132 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 residual_value = concrete_expr_value(residual)
                 if residual_value is None and affine_residual_value is not None:
                     residual_value = affine_residual_value
-                residual_constraints = []
-                if residual_value is None:
-                    residual_constraints = constraints_to_constant(residual, 0, forbidden_vars=rd_vars)
-                    if residual_constraints is None:
-                        continue
-                    residual_value = 0
-                imm = _signed_u64(residual_value)
-                base_start = min_pointer_offset_for_vars(rd_vars, load_idx)
-                if imm >= 0:
-                    base_start = max(base_start, imm + width)
+                residual_options = []
+                if residual_value is not None:
+                    residual_options.append((residual_value, [], True))
+                else:
+                    seen_residual_targets = set()
+                    for residual_target in (-4, 0, 4, 8, 16):
+                        target_key = residual_target & ((1 << 64) - 1)
+                        if target_key in seen_residual_targets:
+                            continue
+                        seen_residual_targets.add(target_key)
+                        residual_constraints = constraints_to_constant(
+                            residual,
+                            target_key,
+                            forbidden_vars=rd_vars,
+                        )
+                        if residual_constraints is None:
+                            continue
+                        residual_options.append((residual_target, residual_constraints, False))
+                if not residual_options:
+                    continue
                 load_addr_key = expr_key(load_addr_symbol)
                 load_offset = addr_expr_offsets.get(load_addr_key)
-                if load_offset is not None:
-                    source_slot = mem_slot_symbols.get(load_offset)
-                    source_value = None if source_slot is None else source_slot.get('chosen_value')
-                    source_pointer_offset = None if source_value is None else stack_offset_for_value(source_value)
-                    if source_pointer_offset is not None:
-                        access_offset = source_pointer_offset - imm
-                        if (
-                            access_offset > 0
-                            and access_offset <= STACK_RANGE
-                            and (not align or access_offset % align == 0)
-                            and source_pointer_offset >= base_start
-                            and source_pointer_offset % INIT_ACCESS_ALIGN == 0
-                            and not any(
-                                concrete_ranges_overlap(access_offset, width, used, used_width)
-                                for used, used_width in avoid_ranges
-                            )
-                        ):
-                            constraints = list(residual_constraints) + [
-                                (init_sp - rd_symbol) == source_pointer_offset,
-                                addr_expr == access_offset,
-                            ]
-                            if try_add_constraint_set_fast(constraints, timeout_ms=5000):
-                                return access_offset
-                starts = []
-                if preferred is not None:
-                    starts.append(preferred)
-                low = _align_up(1, align) if align else 1
-                starts.append(low)
-                starts.extend(used + max(width, used_width) for used, used_width in avoid_ranges)
-                seen_offsets = set()
-                step = align if align else 1
-                attempts = 0
-                max_attempts = 16
-                for start in starts:
-                    start = max(start, low)
-                    if align:
-                        start = _align_up(start, align)
-                    for access_offset in range(start, min(STACK_RANGE, start + 256) + 1, step):
-                        if attempts >= max_attempts:
-                            return None
-                        if access_offset in seen_offsets:
-                            continue
-                        seen_offsets.add(access_offset)
-                        if access_offset <= 0 or access_offset > STACK_RANGE:
-                            continue
-                        if align and access_offset % align != 0:
-                            continue
-                        if any(concrete_ranges_overlap(access_offset, width, used, used_width) for used, used_width in avoid_ranges):
-                            continue
-                        pointer_offset = access_offset + imm
-                        if pointer_offset <= 0 or pointer_offset > STACK_RANGE:
-                            continue
-                        if pointer_offset < base_start:
-                            continue
-                        if pointer_offset % INIT_ACCESS_ALIGN != 0:
-                            continue
-                        attempts += 1
-                        if preferred is not None and access_offset == preferred:
+                for residual_value, residual_constraints, residual_is_concrete in residual_options:
+                    imm = _signed_u64(residual_value)
+                    pointer_avoid_ranges = (
+                        [(load_offset, INIT_ACCESS_SLOT_WIDTH)]
+                        if load_offset is not None
+                        else None
+                    )
+                    base_start = min_pointer_offset_for_vars(
+                        rd_vars,
+                        load_idx,
+                        avoid_ranges=pointer_avoid_ranges,
+                    )
+                    if imm >= 0:
+                        base_start = max(base_start, imm + width)
+                    if load_offset is not None:
+                        source_slot = mem_slot_symbols.get(load_offset)
+                        source_value = None if source_slot is None else source_slot.get('chosen_value')
+                        source_pointer_offset = None if source_value is None else stack_offset_for_value(source_value)
+                        if source_pointer_offset is not None:
+                            access_offset = source_pointer_offset - imm
+                            if (
+                                access_offset > 0
+                                and access_offset <= STACK_RANGE
+                                and (not align or access_offset % align == 0)
+                                and source_pointer_offset >= base_start
+                                and source_pointer_offset % INIT_ACCESS_ALIGN == 0
+                                and not any(
+                                    concrete_ranges_overlap(access_offset, width, used, used_width)
+                                    for used, used_width in avoid_ranges
+                                )
+                            ):
+                                constraints = list(residual_constraints) + [
+                                    (init_sp - rd_symbol) == source_pointer_offset,
+                                    addr_expr == access_offset,
+                                ]
+                                if try_add_constraint_set_fast(constraints, timeout_ms=5000):
+                                    return access_offset
+                    starts = []
+                    if preferred is not None:
+                        starts.append(preferred)
+                    if long_block and residual_constraints:
+                        starts.extend([0x200 - imm, 0x400 - imm, 0x800 - imm, 0xc00 - imm])
+                    low = _align_up(1, align) if align else 1
+                    starts.append(low)
+                    starts.append(base_start - imm)
+                    starts.extend(used + max(width, used_width) for used, used_width in avoid_ranges)
+                    seen_offsets = set()
+                    step = align if align else 1
+                    attempts = 0
+                    max_attempts = 64 if long_block and residual_constraints else 16
+                    for start in starts:
+                        start = max(start, low)
+                        if align:
+                            start = _align_up(start, align)
+                        for access_offset in range(start, min(STACK_RANGE, start + 256) + 1, step):
+                            if attempts >= max_attempts:
+                                break
+                            if access_offset in seen_offsets:
+                                continue
+                            seen_offsets.add(access_offset)
+                            if access_offset <= 0 or access_offset > STACK_RANGE:
+                                continue
+                            if align and access_offset % align != 0:
+                                continue
+                            if any(concrete_ranges_overlap(access_offset, width, used, used_width) for used, used_width in avoid_ranges):
+                                continue
+                            pointer_offset = access_offset + imm
+                            if pointer_offset <= 0 or pointer_offset > STACK_RANGE:
+                                continue
+                            if pointer_offset < base_start:
+                                continue
+                            if pointer_offset % INIT_ACCESS_ALIGN != 0:
+                                continue
+                            attempts += 1
+                            if preferred is not None and access_offset == preferred:
+                                constraints = list(residual_constraints) + [
+                                    (init_sp - rd_symbol) == pointer_offset,
+                                    addr_expr == access_offset,
+                                ]
+                                if try_add_constraint_set_fast(constraints, timeout_ms=5000):
+                                    return access_offset
                             constraints = list(residual_constraints) + [
                                 (init_sp - rd_symbol) == pointer_offset,
                                 addr_expr == access_offset,
                             ]
-                            if try_add_constraint_set_fast(constraints, timeout_ms=5000):
-                                return access_offset
-                        constraints = list(residual_constraints) + [
-                            (init_sp - rd_symbol) == pointer_offset,
-                            addr_expr == access_offset,
-                        ]
-                        if not try_add_constraint_set_fast(
-                            constraints,
-                            timeout_ms=5000,
-                        ):
-                            continue
-                        return access_offset
+                            if not try_add_constraint_set_fast(
+                                constraints,
+                                timeout_ms=5000,
+                            ):
+                                if (
+                                    residual_is_concrete
+                                    and (
+                                        len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                                        or (
+                                            ast_node_count(addr_symbol) <= 3
+                                            and access_offset >= max(32, base_start + INIT_ACCESS_SLOT_WIDTH * 2)
+                                        )
+                                    )
+                                ):
+                                    for constraint in constraints:
+                                        candidate_solver.add(constraint)
+                                    return access_offset
+                                continue
+                            return access_offset
             return None
 
         def choose_carrier_residual_stack_offset(addr_symbol, addr_expr, preferred, align, avoid_ranges, width):
@@ -6295,7 +6458,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         (init_sp - symbol) == base_offset,
                         addr_expr == access_offset,
                     ]
-                    if try_add_constraint_set_fast(constraints, timeout_ms=100):
+                    if try_add_constraint_set_fast(constraints, timeout_ms=5000):
                         return access_offset
             return None
 
@@ -6307,6 +6470,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         _write_profile_stage(name, "init:materialize_init:global_constraints")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_scalar_offsets")
         add_loaded_pointer_scalar_offset_constraints()
+        _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_residual_anchor")
+        add_loaded_pointer_residual_anchor_constraints()
+        _write_profile_stage(name, "init:materialize_init:global_constraints:livein_base_residual_anchor")
+        add_livein_base_residual_anchor_constraints()
         _write_profile_stage(name, "init:materialize_init:global_constraints:arithmetic_hints")
         if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
             add_arithmetic_address_hint_constraints()
@@ -6398,6 +6565,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 reg_min_stack_offsets[reg] = _align_up(min_offset, INIT_ACCESS_ALIGN)
         for reg in undef_base_regs:
             if reg in reg_to_symbol:
+                symbol_vars = expr_vars(reg_to_symbol[reg])
+                if symbol_vars and not any(
+                    expr_vars(addr_symbol) & symbol_vars
+                    for _, addr_symbol, _, _ in mem_accesses
+                ):
+                    continue
                 base_like_regs.add(reg)
                 reg_min_stack_offsets[reg] = max(
                     reg_min_stack_offsets.get(reg, INIT_PTR_MIN_OFFSET),
@@ -6439,8 +6612,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         direct_memory_base_like_regs = set()
         for reg in reg_to_symbol:
+            symbol_vars = expr_vars(reg_to_symbol[reg])
             for inst, addr_symbol, _, _ in mem_accesses:
                 if getattr(inst, 'rs1', None) != reg:
+                    continue
+                if symbol_vars and not (expr_vars(addr_symbol) & symbol_vars):
+                    continue
+                residual = claripy.simplify(addr_symbol - reg_to_symbol[reg])
+                if expr_vars(residual) & symbol_vars:
+                    continue
+                if concrete_expr_value(residual) is None:
                     continue
                 direct_memory_base_like_regs.add(reg)
                 break
@@ -6540,6 +6721,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 continue
             base_like_regs.discard(reg)
             reg_min_stack_offsets.pop(reg, None)
+        for reg in residual_scalar_regs:
+            if reg in direct_memory_base_like_regs:
+                continue
+            base_like_regs.discard(reg)
+            reg_min_stack_offsets.pop(reg, None)
         for reg in fixed_reg_value_hints:
             if reg in direct_memory_base_like_regs:
                 continue
@@ -6558,6 +6744,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 print('loaded_pointer_scalar_regs', [str(reg) for reg in sorted(loaded_pointer_scalar_regs, key=lambda r: r.id)])
             if pointer_nonlinear_scalar_regs:
                 print('pointer_nonlinear_scalar_regs', [str(reg) for reg in sorted(pointer_nonlinear_scalar_regs, key=lambda r: r.id)])
+            if residual_scalar_regs:
+                print('residual_scalar_regs', [str(reg) for reg in sorted(residual_scalar_regs, key=lambda r: r.id)])
 
         deferred_regs = set()
         for reg, symbol in reg_to_symbol.items():
@@ -6891,8 +7079,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         inst_idx=inst_idx,
                         phase="choose_offset:pointer_load_addr",
                     )
-                    if addr is None and len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
+                    if addr is None:
                         addr = choose_pointer_load_addr_offset(
+                            addr_symbol,
+                            addr_expr,
+                            preferred_offset,
+                            inst.width if inst.width > 1 else None,
+                            avoid_ranges,
+                            INIT_ACCESS_SLOT_WIDTH,
+                        )
+                    if addr is None and preferred_offset is not None:
+                        addr = choose_carrier_residual_stack_offset(
                             addr_symbol,
                             addr_expr,
                             preferred_offset,
@@ -7007,8 +7204,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             scalar_zero_load = is_scalar_zero_address_load(inst, value_expr, inst_idx)
             if scalar_zero_load:
                 constraint = value_expr == expr_bvv(0, value_expr)
-                candidate_solver.add(constraint)
-                added_constraint_cache.add(str(claripy.simplify(constraint)))
+                try_add_constraint(constraint, timeout_ms=local_solver_timeout_ms)
             require_load_value = (
                 len(mem_entries) < STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                 or load_value_key in required_load_value_keys
