@@ -48,8 +48,7 @@ from rvmca.analysis import RVFG
 
 _available_regs = [
     find_reg_by_name(n)
-    for n in ['gp', 'tp'] + \
-             [f't{i}' for i in range(7)] + \
+    for n in [f't{i}' for i in range(7)] + \
              [f'a{i}' for i in range(8)] + \
              [f's{i}' for i in range(12)]
 ]
@@ -166,7 +165,8 @@ def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
         need_remap.remove(XREG[0])
 
     available_regs = [r for r in candidate_regs if r not in regs]
-    assert len(need_remap) <= len(available_regs), 'Fail to remap regs. Not enough available regs!'
+    if len(need_remap) > len(available_regs):
+        raise UnsupportedBlockError("not enough safe registers for remapping")
 
     x_need_remap, f_need_remap = [], []
     for reg in need_remap:
@@ -189,8 +189,10 @@ def remap_regs_for_block(prog: Program, candidate_regs=None) -> Program:
     if Reg(0) in x_available:
         x_available.remove(Reg(0))
 
-    assert len(x_need_remap) <= len(x_available), 'Fail to remap regs. Not enough available xregs.'
-    assert len(f_need_remap) <= len(f_available), 'Fail to remap regs. Not enough available fregs!'
+    if len(x_need_remap) > len(x_available):
+        raise UnsupportedBlockError("not enough safe x-registers for remapping")
+    if len(f_need_remap) > len(f_available):
+        raise UnsupportedBlockError("not enough safe f-registers for remapping")
 
     def map_regs(srcs, tgts):
         map_table = {
@@ -2754,13 +2756,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if fast_positive and positive:
                 for val in solver_eval_with(expr, [], n=8):
                     val &= ((1 << 64) - 1)
-                    if val in seen:
-                        continue
-                    seen.add(val)
-                    if not concrete_value_ok(val):
-                        continue
-                    candidate_solver.add(expr == val)
-                    return val
+                    result = try_candidate(val)
+                    if result is not None:
+                        return result
 
             for val in [preferred]:
                 result = try_candidate(val)
@@ -2768,9 +2766,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return result
 
             materialized_val = concrete_value_from_materialized(expr)
-            if materialized_val is not None and concrete_value_ok(materialized_val):
-                candidate_solver.add(expr == materialized_val)
-                return materialized_val
+            result = try_candidate(materialized_val)
+            if result is not None:
+                return result
 
             if not positive:
                 result = try_candidate(0)
@@ -3331,17 +3329,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
             for val in solver_eval_limited(expr, n=16, timeout_ms=5000, extra_constraints=fallback_constraints):
                 val &= ((1 << 64) - 1)
-                if concrete_value_ok(val):
-                    candidate_solver.add(expr == val)
-                    return val
+                result = try_candidate(val)
+                if result is not None:
+                    return result
 
             val = minimum
             if val is None:
                 raise AssertionError(f"cannot choose concrete value for {expr}")
             if not concrete_value_ok(val):
                 raise AssertionError(f"cannot choose non-overlapping concrete value for {expr}")
-            candidate_solver.add(expr == val)
-            return val
+            result = try_candidate(val)
+            if result is not None:
+                return result
+            raise AssertionError(f"cannot choose satisfiable concrete value for {expr}")
 
         def try_add_constraint(constraint, timeout_ms=HEURISTIC_SOLVER_TIMEOUT_MS):
             constraint_key = str(claripy.simplify(constraint))
@@ -3902,7 +3902,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if protected:
                 timeout_ms = 100 if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD else HEURISTIC_SOLVER_TIMEOUT_MS
                 return try_add_constraint(constraint, timeout_ms=timeout_ms)
-            candidate_solver.add(constraint)
+            if not try_add_constraint(constraint, timeout_ms=local_solver_timeout_ms):
+                return False
             return True
 
         def cheap_same_address(addr_a, addr_b):
@@ -5009,6 +5010,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if not constraints:
                     return True
                 if direct_add_for_long_block:
+                    test_solver = candidate_solver.branch()
+                    test_solver.timeout = local_solver_timeout_ms
+                    try:
+                        for constraint in constraints:
+                            test_solver.add(constraint)
+                        if not test_solver.satisfiable():
+                            return False
+                    except Exception:
+                        return False
                     for constraint in constraints:
                         constraint_key = str(claripy.simplify(constraint))
                         if constraint_key in added_constraint_cache:
@@ -6387,19 +6397,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 constraints,
                                 timeout_ms=5000,
                             ):
-                                if (
-                                    residual_is_concrete
-                                    and (
-                                        len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
-                                        or (
-                                            ast_node_count(addr_symbol) <= 3
-                                            and access_offset >= max(32, base_start + INIT_ACCESS_SLOT_WIDTH * 2)
-                                        )
-                                    )
-                                ):
-                                    for constraint in constraints:
-                                        candidate_solver.add(constraint)
-                                    return access_offset
                                 continue
                             return access_offset
             return None
@@ -6467,51 +6464,85 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         scalar_offset = 0
         sp_affine_mem_offsets = {}
 
+        debug_unsat_stages = os.environ.get("RVMCA_DEBUG_UNSAT") == "1"
+        def debug_check_stage(stage):
+            if not debug_unsat_stages:
+                return
+            result = None
+            try:
+                check_solver = candidate_solver.branch()
+                check_solver.timeout = local_solver_timeout_ms
+                result = check_solver.satisfiable()
+            except Exception as exc:
+                result = f"error:{type(exc).__name__}"
+            print(f"debug_unsat_stage {stage}: {result}")
+
         _write_profile_stage(name, "init:materialize_init:global_constraints")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_scalar_offsets")
         add_loaded_pointer_scalar_offset_constraints()
+        debug_check_stage("loaded_pointer_scalar_offsets")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_residual_anchor")
         add_loaded_pointer_residual_anchor_constraints()
+        debug_check_stage("loaded_pointer_residual_anchor")
         _write_profile_stage(name, "init:materialize_init:global_constraints:livein_base_residual_anchor")
         add_livein_base_residual_anchor_constraints()
+        debug_check_stage("livein_base_residual_anchor")
         _write_profile_stage(name, "init:materialize_init:global_constraints:arithmetic_hints")
         if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
             add_arithmetic_address_hint_constraints()
+        debug_check_stage("arithmetic_hints")
         _write_profile_stage(name, "init:materialize_init:global_constraints:scalar_zero_address_loads")
         add_scalar_zero_address_load_constraints()
+        debug_check_stage("scalar_zero_address_loads")
         _write_profile_stage(name, "init:materialize_init:global_constraints:livein_loaded_offset_base")
         add_livein_loaded_offset_base_constraints()
+        debug_check_stage("livein_loaded_offset_base")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_addr_scalar_zero")
         add_loaded_address_scalar_zero_constraints()
+        debug_check_stage("loaded_addr_scalar_zero")
         _write_profile_stage(name, "init:materialize_init:global_constraints:direct_loaded_pointer_stack")
         add_direct_loaded_pointer_stack_constraints()
+        debug_check_stage("direct_loaded_pointer_stack")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_scalar_load_slot_no_overlap")
         add_pointer_scalar_load_slot_no_overlap_constraints()
+        debug_check_stage("pointer_scalar_load_slot_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:access_range")
         add_access_range_constraints()
+        debug_check_stage("access_range")
         _write_profile_stage(name, "init:materialize_init:global_constraints:memory_dataflow")
         add_memory_dataflow_constraints()
+        debug_check_stage("memory_dataflow")
         _write_profile_stage(name, "init:materialize_init:global_constraints:store_pointer_sources")
         if retry_index == 0 or len(mem_entries) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD:
             add_store_pointer_source_constraints()
+        debug_check_stage("store_pointer_sources")
         _write_profile_stage(name, "init:materialize_init:global_constraints:load_slot_no_overlap")
         add_load_slot_no_overlap_constraints()
+        debug_check_stage("load_slot_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_load_slot_no_overlap")
         add_pointer_load_slot_no_overlap_constraints()
+        debug_check_stage("pointer_load_slot_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_derived_slot_no_overlap")
         add_pointer_derived_access_slot_no_overlap_constraints()
+        debug_check_stage("pointer_derived_slot_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_value_no_alias")
         add_pointer_value_no_alias_constraints()
+        debug_check_stage("pointer_value_no_alias")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_anchor")
         add_pointer_anchor_simplification_constraints()
+        debug_check_stage("pointer_anchor")
         _write_profile_stage(name, "init:materialize_init:global_constraints:register_anchor")
         add_register_anchor_simplification_constraints()
+        debug_check_stage("register_anchor")
         _write_profile_stage(name, "init:materialize_init:global_constraints:store_load_slot_no_overlap")
         add_store_load_slot_no_overlap_constraints()
+        debug_check_stage("store_load_slot_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:risky_source_no_overlap")
         add_risky_source_no_overlap_constraints()
+        debug_check_stage("risky_source_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:pointer_slot_store_no_overlap")
         add_pointer_slot_store_no_overlap_constraints()
+        debug_check_stage("pointer_slot_store_no_overlap")
         _write_profile_stage(name, "init:materialize_init:global_constraints:done")
 
         loaded_addr_vars = set()
@@ -7169,8 +7200,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 positive=True,
                                 align=inst.width if inst.width > 1 else None,
                                 width=INIT_ACCESS_SLOT_WIDTH,
+                                required=not (len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD),
                                 fast_positive=True,
                             )
+                            if (
+                                addr is None
+                                and len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                            ):
+                                continue
                         except AssertionError:
                             fallback_offset = preferred_offset
                             if fallback_offset is None:
@@ -7182,8 +7219,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             if fallback_offset is not None and try_add_constraint(addr_expr == fallback_offset):
                                 addr = fallback_offset
                             else:
+                                if (
+                                    len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                                    and not force_exact_load_slot
+                                ):
+                                    continue
                                 raise
                     addr_expr_offsets[addr_key] = addr
+            if debug_unsat_stages:
+                debug_check_stage(f"load_slot_{load_slot_idx}_idx_{inst_idx}_addr_{addr}")
             processed_load_addr_keys.add(addr_key)
             if not duplicate_load_addr:
                 access_ranges.append((addr, INIT_ACCESS_SLOT_WIDTH, addr_symbol))
@@ -7238,7 +7282,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 not new_word_slot
                 and 'direct_value_expr' in slot
             ):
-                candidate_solver.add(slot['symbol'] == slot['direct_value_expr'])
+                try_add_constraint(slot['symbol'] == slot['direct_value_expr'], timeout_ms=local_solver_timeout_ms)
                 del slot['direct_value_expr']
 
             if not require_load_value:
@@ -7368,9 +7412,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             mem_slot_symbols[word_offset]['min_pointer_offset'],
                             min_pointer_offset_for_vars(pointer_vars, pointer_idx, avoid_ranges=[(word_offset, 8)]),
                         )
+            if debug_unsat_stages:
+                debug_check_stage(f"load_slot_{load_slot_idx}_idx_{inst_idx}_word_{word_offset}_field_{field_added}")
 
         for word_offset, slot in mem_slot_symbols.items():
             add_store_no_overlap_for_word(word_offset, mem_offset_addr_symbols[word_offset])
+            if debug_unsat_stages:
+                debug_check_stage(f"store_no_overlap_word_{word_offset}")
 
         if verbose:
             print('mem_slot_symbols', {
@@ -7971,13 +8019,12 @@ def transform_for_profiling(filepath, output_path='', add_init: str = False, ver
         prog = remap_regs_for_block(prog)
         _write_profile_stage(test_name, "transform:check_lui_auipc")
         if has_lui_auipc(prog):
-            if os.environ.get("RVMCA_ALLOW_LUI_AUIPC") == "1":
-                fixed_access = find_unmappable_fixed_address_access(prog)
-                if fixed_access is not None:
-                    return f"SKIP: unmappable fixed address access at {fixed_access.code}"
-                prog = fix_lui_auipc_imm(prog)
-            else:
+            fixed_access = find_unmappable_fixed_address_access(prog)
+            if fixed_access is not None:
+                return f"SKIP: unmappable fixed address access at {fixed_access.code}"
+            if os.environ.get("RVMCA_STRICT_LUI_AUIPC") == "1":
                 return f"SKIP: unsupported lui/auipc block: {test_name}"
+            prog = fix_lui_auipc_imm(prog)
         # if verbose:
         #     INFO(f'<Block>:\n{content}')
         #     INFO(f'<New Block>:\n{prog.code}')
@@ -8029,6 +8076,8 @@ def transform_for_profiling(filepath, output_path='', add_init: str = False, ver
         # run_cmd(f"mv {OUTPUT_PATH / test_name}.init {output_path}.init")
         assert result, "Error: pp fails."
         _write_profile_stage(test_name, "transform:done")
+    except UnsupportedBlockError as e:
+        return f"SKIP: {e}"
     except Exception as e:
         import traceback
         traceback.print_exc()
