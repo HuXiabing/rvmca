@@ -989,11 +989,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             sp_affine_cache_items(sp_affine_mem_offsets),
         )
 
-    def replay_prefix_state(reg_values, mem_values, target_addr, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def replay_prefix_states(reg_values, mem_values, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
         _write_profile_stage(name, "init:concrete_replay_prefix")
         cache_key = replay_prefix_cache_key(reg_values, mem_values, sp_value, sp_affine_mem_offsets)
         if cache_key in replay_prefix_state_cache:
-            return replay_prefix_state_cache[cache_key].get(target_addr)
+            return replay_prefix_state_cache[cache_key]
 
         states_by_addr = concrete_prefix_states(
             reg_values,
@@ -1003,7 +1003,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         )
         if states_by_addr is not None:
             replay_prefix_state_cache[cache_key] = states_by_addr
-            return states_by_addr.get(target_addr)
+            return states_by_addr
 
         replay_state = proj.factory.blank_state(
             addr=begin_addr,
@@ -1024,15 +1024,23 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 except Exception:
                     continue
                 states_by_addr.setdefault(ip, state)
-                if ip == target_addr:
-                    replay_prefix_state_cache[cache_key] = states_by_addr
-                    return state
             if not replay_mgr.active:
                 replay_prefix_state_cache[cache_key] = states_by_addr
-                return None
+                return states_by_addr
             replay_mgr.step()
         replay_prefix_state_cache[cache_key] = states_by_addr
-        return None
+        return states_by_addr
+
+    def replay_prefix_state(reg_values, mem_values, target_addr, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+        states_by_addr = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
+        if states_by_addr is None:
+            return None
+        return states_by_addr.get(target_addr)
 
     def concrete_ranges_overlap(addr1, width1, addr2, width2):
         lo1, hi1 = addr1 - width1 + 1, addr1
@@ -1281,6 +1289,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         len(access_insts) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
         or (has_symbolic_mul and len(access_insts) >= 2)
     )
+    static_mul_zero_constraints = []
+    static_mul_zero_constraint_keys = set()
 
     def static_collect_memory_accesses():
         complex_static_collection = True
@@ -1302,6 +1312,28 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def symbolic_expr(expr):
             return bool(getattr(expr, 'variables', set()))
+
+        def record_static_mul_zero_constraint(expr, args=None):
+            if not symbolic_expr(expr):
+                return
+            symbolic_args = [
+                arg for arg in (args or ())
+                if hasattr(arg, 'op') and symbolic_expr(arg)
+            ]
+            livein_args = [
+                arg for arg in symbolic_args
+                if static_ast_vars(arg) and static_ast_vars(arg) <= livein_symbol_vars
+            ]
+            target = (livein_args or symbolic_args or [expr])[0]
+            try:
+                constraint = target == bvv(0, target.size())
+            except Exception:
+                constraint = target == bvv(0)
+            key = str(claripy.simplify(constraint))
+            if key in static_mul_zero_constraint_keys:
+                return
+            static_mul_zero_constraint_keys.add(key)
+            static_mul_zero_constraints.append(constraint)
 
         def static_ast_node_count(expr):
             seen = set()
@@ -1383,6 +1415,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 if not (residual_vars & livein_symbol_vars):
                     continue
+                record_static_mul_zero_constraint(node, getattr(node, 'args', ()))
                 result = static_replace_ast(result, node, bvv(0))
             return maybe_simplify(result)
 
@@ -1422,10 +1455,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return sign_extend_32(lhs - rhs)
             if inst.name == 'mul':
                 if not should_preserve_symbolic_mul(lhs, rhs):
+                    record_static_mul_zero_constraint(lhs * rhs, (lhs, rhs))
                     return bvv(0)
                 return lhs * rhs
             if inst.name == 'mulw':
                 if not should_preserve_symbolic_mul(lhs, rhs):
+                    record_static_mul_zero_constraint(sign_extend_32(lhs * rhs), (lhs, rhs))
                     return bvv(0)
                 return sign_extend_32(lhs * rhs)
             if inst.name == 'and':
@@ -1595,6 +1630,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         solver.add(final_state.regs.x0 == 0)
 
     for constraint in undef_reg_check_constraints:
+        solver.add(constraint)
+    for constraint in static_mul_zero_constraints:
         solver.add(constraint)
 
     _write_profile_stage(name, "init:constraint_satisfiability")
@@ -1837,6 +1874,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             claripy.ULE(offset_expr, claripy.BVV(STACK_RANGE, 64)),
             (offset_expr & (INIT_ACCESS_ALIGN - 1)) == 0,
         ]
+
+    def livein_memory_base_regs(instructions):
+        regs = set()
+        defined = {XREG[0]}
+        for inst in instructions:
+            if inst.type in [IType.Load, IType.Store, IType.Amo]:
+                rs1 = getattr(inst, 'rs1', None)
+                if rs1 in XREG and rs1 not in defined:
+                    regs.add(rs1)
+            rd = inst.get_def()
+            if rd in XREG and rd != XREG[0]:
+                defined.add(rd)
+        return regs
 
     def build_arithmetic_address_hints():
         env = {}
@@ -2454,11 +2504,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             else:
                 env[rd] = unknown_expr(inst)
 
-        direct_memory_base_regs = {
-            inst.rs1
-            for inst in prog.insts
-            if inst.type in [IType.Load, IType.Store, IType.Amo]
-        }
+        direct_memory_base_regs = livein_memory_base_regs(prog.insts)
         for reg in list(reg_pointer_hints):
             if reg in direct_memory_base_regs:
                 continue
@@ -2469,11 +2515,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         return load_value_hints, load_pointer_hints, reg_pointer_hints, reg_value_hints, load_nonzero_hints, reg_nonzero_hints
 
     load_value_hints, load_pointer_hints, reg_pointer_hints, reg_value_hints, load_nonzero_hints, reg_nonzero_hints = build_arithmetic_address_hints()
-    direct_memory_base_regs = {
-        inst.rs1
-        for inst in prog.insts
-        if inst.type in [IType.Load, IType.Store, IType.Amo]
-    }
+    direct_memory_base_regs = livein_memory_base_regs(prog.insts)
     scalar_hint_regs = {
         reg
         for reg, values in reg_value_hints.items()
@@ -2991,6 +3033,151 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if result is not None:
                 return result
 
+            def try_scaled_index_offset_candidate():
+                if not positive:
+                    return None
+                if (
+                    getattr(expr, 'op', None) in {'__sub__', 'Sub'}
+                    and len(getattr(expr, 'args', ())) == 2
+                    and expr_key(expr.args[0]) == expr_key(init_sp)
+                ):
+                    addr_expr = claripy.simplify(expr.args[1])
+                else:
+                    addr_expr = claripy.simplify(init_sp - expr)
+                addr_vars = expr_vars(addr_expr)
+                if not addr_vars:
+                    return None
+                mask = (1 << 64) - 1
+
+                def parse_scaled(node, symbol, symbol_key, symbol_vars):
+                    node = claripy.simplify(node)
+                    if expr_key(node) == symbol_key:
+                        return 1, 0, []
+                    node_vars = expr_vars(node)
+                    if not node_vars:
+                        value = concrete_expr_value(node)
+                        if value is None:
+                            return None
+                        return 0, value & mask, []
+                    if not (node_vars & symbol_vars):
+                        try:
+                            zero = claripy.BVV(0, node.size())
+                        except Exception:
+                            zero = claripy.BVV(0, 64)
+                        return 0, 0, [node == zero]
+                    op = getattr(node, 'op', None)
+                    raw_args = getattr(node, 'args', ())
+                    args = [arg for arg in raw_args if hasattr(arg, 'op')]
+                    if op in {'__add__', 'Add'}:
+                        scale, const, constraints = 0, 0, []
+                        for arg in args:
+                            parsed = parse_scaled(arg, symbol, symbol_key, symbol_vars)
+                            if parsed is None:
+                                return None
+                            arg_scale, arg_const, arg_constraints = parsed
+                            scale += arg_scale
+                            const = (const + arg_const) & mask
+                            constraints.extend(arg_constraints)
+                        return scale, const, constraints
+                    if op in {'__sub__', 'Sub'} and args:
+                        lhs = parse_scaled(args[0], symbol, symbol_key, symbol_vars)
+                        if lhs is None:
+                            return None
+                        scale, const, constraints = lhs
+                        for arg in args[1:]:
+                            rhs = parse_scaled(arg, symbol, symbol_key, symbol_vars)
+                            if rhs is None:
+                                return None
+                            rhs_scale, rhs_const, rhs_constraints = rhs
+                            scale -= rhs_scale
+                            const = (const - rhs_const) & mask
+                            constraints.extend(rhs_constraints)
+                        return scale, const, constraints
+                    if op == '__lshift__' and len(raw_args) == 2:
+                        parsed = parse_scaled(raw_args[0], symbol, symbol_key, symbol_vars)
+                        shift_arg = raw_args[1]
+                        shift_value = (
+                            shift_arg
+                            if isinstance(shift_arg, int)
+                            else concrete_expr_value(shift_arg)
+                        )
+                        if parsed is None or shift_value is None:
+                            return None
+                        scale, const, constraints = parsed
+                        return scale << shift_value, (const << shift_value) & mask, constraints
+                    if op in {'ZeroExt', 'SignExt'} and args:
+                        return parse_scaled(args[-1], symbol, symbol_key, symbol_vars)
+                    return None
+
+                starts = []
+                if preferred is not None:
+                    starts.append(preferred)
+                low = _align_up(1, align) if align else 1
+                starts.append(low)
+                starts.extend(used + max(width, used_width) for used, used_width in avoid)
+                step_local = align if align else 1
+
+                for reg, symbol in reg_to_symbol.items():
+                    symbol_vars = expr_vars(symbol)
+                    if not symbol_vars or not (addr_vars & symbol_vars):
+                        continue
+                    parsed = parse_scaled(addr_expr, symbol, expr_key(symbol), symbol_vars)
+                    if verbose and name.endswith('8648'):
+                        print('scaled_offset_candidate_parse', {
+                            'reg': reg.name,
+                            'addr_expr': str(addr_expr),
+                            'parsed': None if parsed is None else (parsed[0], parsed[1], len(parsed[2])),
+                        })
+                    if parsed is None:
+                        continue
+                    scale, const, scaled_constraints = parsed
+                    if scale <= 1 or scale & (scale - 1):
+                        continue
+                    seen_offsets = set()
+                    attempts = 0
+                    for start in starts:
+                        start = _align_up(max(low, start), step_local)
+                        for access_offset in range(start, min(STACK_RANGE, start + 512) + 1, step_local):
+                            if access_offset in seen_offsets:
+                                continue
+                            seen_offsets.add(access_offset)
+                            if attempts >= (4 if complex_memory_block else 32):
+                                break
+                            if not concrete_value_ok(access_offset):
+                                continue
+                            target_addr = concrete_stack_addr(access_offset)
+                            raw_value = (target_addr - const) & mask
+                            if raw_value % scale:
+                                continue
+                            reg_value = (raw_value // scale) & mask
+                            attempts += 1
+                            constraints = list(scaled_constraints) + [
+                                symbol == reg_value,
+                                expr == access_offset,
+                            ]
+                            if (
+                                try_add_constraint_set_fast(
+                                    constraints,
+                                    timeout_ms=100 if complex_memory_block else HEURISTIC_SOLVER_TIMEOUT_MS,
+                                )
+                                or try_add_constraint_set_related(
+                                    constraints,
+                                    expr_vars(expr) | symbol_vars,
+                                    timeout_ms=1000 if use_static_memory_collection else HEURISTIC_SOLVER_TIMEOUT_MS,
+                                )
+                            ):
+                                return access_offset
+                            if use_static_memory_collection:
+                                for constraint in constraints:
+                                    candidate_solver.add(constraint)
+                                    added_constraint_cache.add(str(claripy.simplify(constraint)))
+                                return access_offset
+                return None
+
+            result = try_scaled_index_offset_candidate()
+            if result is not None:
+                return result
+
             def try_pointer_load_base_offset_candidate():
                 if not positive:
                     return None
@@ -3470,6 +3657,50 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return False
             for constraint in constraints:
                 candidate_solver.add(constraint)
+            return True
+
+        def try_add_constraint_set_related(constraints, seed_vars, timeout_ms=1000):
+            constraints = list(constraints)
+            closure = set(seed_vars)
+            for constraint in constraints:
+                closure.update(getattr(constraint, 'variables', set()))
+            if not closure:
+                return try_add_constraint_set_fast(constraints, timeout_ms=timeout_ms)
+
+            selected = []
+            selected_ids = set()
+            changed = True
+            while changed:
+                changed = False
+                for constraint in candidate_solver.constraints:
+                    constraint_id = id(constraint)
+                    if constraint_id in selected_ids:
+                        continue
+                    constraint_vars = getattr(constraint, 'variables', set())
+                    if not (constraint_vars & closure):
+                        continue
+                    selected_ids.add(constraint_id)
+                    selected.append(constraint)
+                    new_vars = constraint_vars - closure
+                    if new_vars:
+                        closure.update(new_vars)
+                        changed = True
+
+            test_solver = claripy.Solver()
+            test_solver.timeout = timeout_ms
+            try:
+                for constraint in selected:
+                    test_solver.add(constraint)
+                for constraint in constraints:
+                    test_solver.add(constraint)
+                if not test_solver.satisfiable():
+                    return False
+            except Exception:
+                return False
+
+            for constraint in constraints:
+                candidate_solver.add(constraint)
+                added_constraint_cache.add(str(claripy.simplify(constraint)))
             return True
 
         def expr_bvv(value, expr):
@@ -5416,7 +5647,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     for used_offset, used_width in used_stack_offsets
                 ):
                     continue
-                if satisfiable_with(symbol, val, timeout_ms=HEURISTIC_SOLVER_TIMEOUT_MS):
+                if satisfiable_with(symbol, val, timeout_ms=local_solver_timeout_ms):
                     candidate_solver.add(symbol == val)
                     if stack_offset is not None:
                         used_stack_offsets.append((stack_offset, 8))
@@ -5441,7 +5672,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     for used_offset, used_width in used_stack_offsets
                 ):
                     continue
-                if satisfiable_with(symbol, val, timeout_ms=HEURISTIC_SOLVER_TIMEOUT_MS):
+                if satisfiable_with(symbol, val, timeout_ms=local_solver_timeout_ms):
                     candidate_solver.add(symbol == val)
                     if stack_offset is not None:
                         used_stack_offsets.append((stack_offset, 8))
@@ -6945,8 +7176,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         direct_memory_base_like_regs = set()
         for reg in reg_to_symbol:
             symbol_vars = expr_vars(reg_to_symbol[reg])
-            for inst, addr_symbol, _, _ in mem_accesses:
+            for inst, addr_symbol, access_idx, _ in mem_accesses:
                 if getattr(inst, 'rs1', None) != reg:
+                    continue
+                if reg_defined_before_access(reg, access_idx):
                     continue
                 if symbol_vars and not (expr_vars(addr_symbol) & symbol_vars):
                     continue
@@ -6969,7 +7202,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             has_direct_livein_base_use = any(
                 getattr(inst, 'rs1', None) == reg
                 and (expr_vars(addr_symbol) & symbol_vars)
-                for inst, addr_symbol, _, _ in mem_accesses
+                and not reg_defined_before_access(reg, access_idx)
+                for inst, addr_symbol, access_idx, _ in mem_accesses
             )
             if has_direct_livein_base_use:
                 continue
@@ -7100,6 +7334,30 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return True
             return False
 
+        def has_self_mul_address_residual(reg):
+            tracking = False
+            for inst in prog.insts:
+                if (
+                    isinstance(inst, RFmtInst)
+                    and inst.name in {'mul', 'mulw'}
+                    and inst.rd == reg
+                    and (inst.rs1 == reg or inst.rs2 == reg)
+                ):
+                    tracking = True
+                    continue
+                if tracking and inst.type in [IType.Load, IType.Store, IType.Amo] and inst.rs1 == reg:
+                    return True
+                rd = inst.get_def()
+                if rd != reg:
+                    continue
+                uses_reg = (
+                    getattr(inst, 'rs1', None) == reg
+                    or getattr(inst, 'rs2', None) == reg
+                )
+                if tracking and uses_reg:
+                    continue
+                tracking = False
+
         for reg, symbol in reg_to_symbol.items():
             if reg in base_like_regs:
                 continue
@@ -7132,11 +7390,51 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             symbol = reg_to_symbol[r]
             write_stage("init:materialize_init:register", reg=r.name, phase="start")
             hinted_values = sorted({value & ((1 << 64) - 1) for value in reg_value_hints.get(r, [])})
+            symbol_vars_for_fallback = expr_vars(symbol)
+            address_uses_for_symbol = [
+                addr_symbol
+                for _, addr_symbol, _, _ in mem_accesses
+                if symbol_vars_for_fallback and (expr_vars(addr_symbol) & symbol_vars_for_fallback)
+            ]
+            has_additive_address_use = any(
+                not (expr_vars(claripy.simplify(addr_symbol - symbol)) & symbol_vars_for_fallback)
+                for addr_symbol in address_uses_for_symbol
+            )
+            has_nonadditive_address_use = any(
+                expr_vars(claripy.simplify(addr_symbol - symbol)) & symbol_vars_for_fallback
+                for addr_symbol in address_uses_for_symbol
+            )
+            base_like_varset = set()
+            for base_reg in base_like_regs:
+                base_symbol = reg_to_symbol.get(base_reg)
+                if base_symbol is not None:
+                    base_like_varset.update(expr_vars(base_symbol))
+            has_other_stack_carrier = any(
+                (expr_vars(addr_symbol) - symbol_vars_for_fallback)
+                & (base_like_varset | pointer_loaded_addr_vars)
+                for addr_symbol in address_uses_for_symbol
+            )
+            residual_like_scalar = r in residual_scalar_regs or r in pointer_nonlinear_scalar_regs
+            self_mul_address_residual = has_self_mul_address_residual(r)
+            scaled_address_carrier_use = has_scaled_address_carrier_use(symbol)
+            singleton_scalar_hint = len(hinted_values) == 1 and r not in direct_memory_base_like_regs
+            allow_scalar_base_fallback = (
+                has_additive_address_use
+                and not residual_like_scalar
+                and not self_mul_address_residual
+                and not singleton_scalar_hint
+                and r not in scalar_hint_regs
+            )
             val = None
-            if r not in base_like_regs:
+            if r not in base_like_regs and not self_mul_address_residual:
                 write_stage("init:materialize_init:register", reg=r.name, phase="scaled_addr_carrier")
                 val = choose_scaled_address_register_value(symbol)
-            if len(hinted_values) == 1 and r not in direct_memory_base_like_regs:
+            if (
+                len(hinted_values) == 1
+                and r not in direct_memory_base_like_regs
+                and not self_mul_address_residual
+                and not scaled_address_carrier_use
+            ):
                 write_stage("init:materialize_init:register", reg=r.name, phase="value_hint")
                 if val is None:
                     try:
@@ -7167,11 +7465,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if val is None:
                 write_stage("init:materialize_init:register", reg=r.name, phase="stack_relative" if r in base_like_regs else "non_base")
                 if r in base_like_regs:
+                    fallback_start = max(
+                        INIT_PTR_MIN_OFFSET,
+                        reg_min_stack_offsets.get(r, INIT_PTR_MIN_OFFSET),
+                    )
                     direct_offset = next_free_stack_offset(
                         used_stack_offsets,
                         align=INIT_ACCESS_ALIGN,
                         width=8,
-                        start=INIT_PTR_MIN_OFFSET,
+                        start=fallback_start,
                     )
                     if direct_offset is not None:
                         val = concrete_stack_addr(direct_offset)
@@ -7188,7 +7490,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 has_direct_livein_base_use = symbol_vars and any(
                     getattr(inst, 'rs1', None) == r
                     and (expr_vars(addr_symbol) & symbol_vars)
-                    for inst, addr_symbol, _, _ in mem_accesses
+                    and not reg_defined_before_access(r, access_idx)
+                    for inst, addr_symbol, access_idx, _ in mem_accesses
                 )
                 has_loaded_address_use = symbol_vars and any(
                     (expr_vars(addr_symbol) & symbol_vars)
@@ -7199,6 +7502,34 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     write_stage("init:materialize_init:register", reg=r.name, phase="loaded_addr_scalar_zero")
                     if try_add_constraint(symbol == expr_bvv(0, symbol)):
                         val = 0
+            if (
+                val is None
+                and r not in base_like_regs
+                and (
+                    (has_nonadditive_address_use and has_other_stack_carrier)
+                    or self_mul_address_residual
+                )
+            ):
+                write_stage("init:materialize_init:register", reg=r.name, phase="nonadditive_addr_scalar_zero")
+                zero_constraint = symbol == expr_bvv(0, symbol)
+                zero_timeout_ms = (
+                    1000
+                    if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                    else HEURISTIC_SOLVER_TIMEOUT_MS
+                )
+                if (
+                    try_add_constraint_set_fast([zero_constraint], timeout_ms=zero_timeout_ms)
+                    or try_add_constraint_set_related(
+                        [zero_constraint],
+                        symbol_vars_for_fallback,
+                        timeout_ms=zero_timeout_ms,
+                    )
+                ):
+                    val = 0
+                elif use_static_memory_collection:
+                    candidate_solver.add(zero_constraint)
+                    added_constraint_cache.add(str(claripy.simplify(zero_constraint)))
+                    val = 0
             if val is not None:
                 stack_offset = stack_offset_for_value(val)
                 if stack_offset is not None and not any(
@@ -7226,7 +7557,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         val = 0
                     elif try_add_constraint_set_fast([symbol == expr_bvv(0, symbol)]):
                         val = 0
-                if val is None and r not in base_like_regs and has_address_use:
+                if (
+                    val is None
+                    and r not in base_like_regs
+                    and has_address_use
+                    and allow_scalar_base_fallback
+                ):
                     constrained_address_scalar = any(
                         getattr(constraint, 'variables', set()) & symbol_vars
                         for constraint in candidate_solver.constraints
@@ -7256,7 +7592,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if val is None:
                         write_stage("init:materialize_init:register", reg=r.name, phase="scaled_addr_fallback")
                         val = choose_scaled_address_register_value(symbol)
-                    if val is None:
+                    if val is None and allow_scalar_base_fallback:
                         val = choose_base_register_value(symbol, INIT_PTR_MIN_OFFSET, fast_anchor=True)
                     if val is None:
                         val = choose_stack_relative_register_value(symbol)
@@ -7923,15 +8259,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         constraints = []
         mem_offsets = sorted(mem_values.keys())
+        prefix_states = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
         for store_inst, store_addr_symbol, store_inst_idx, store_width, _ in store_accesses:
             store_addr = original_access_addr(store_inst_idx)
-            store_state = replay_prefix_state(
-                reg_values,
-                mem_values,
-                store_addr,
-                sp_value=sp_value,
-                sp_affine_mem_offsets=sp_affine_mem_offsets,
-            )
+            store_state = prefix_states.get(store_addr) if prefix_states is not None else None
             if store_state is None:
                 continue
 
@@ -7956,6 +8292,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     ):
         constraints = []
         seen_loads = set()
+        prefix_states = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads + address_source_loads:
             if (load_idx, stable_expr_key(rd_symbol)) in scalar_load_hint_keys:
                 continue
@@ -7964,13 +8306,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 continue
             seen_loads.add(load_key)
             load_addr = original_access_addr(load_idx)
-            load_state = replay_prefix_state(
-                reg_values,
-                mem_values,
-                load_addr,
-                sp_value=sp_value,
-                sp_affine_mem_offsets=sp_affine_mem_offsets,
-            )
+            load_state = prefix_states.get(load_addr) if prefix_states is not None else None
             if load_state is None:
                 continue
             concrete_load_addr = load_state.solver.eval(getattr(load_state.regs, str(load_inst.rs1))) + load_inst.imm
@@ -7989,13 +8325,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if store_idx >= load_idx:
                     continue
                 store_addr = original_access_addr(store_idx)
-                store_state = replay_prefix_state(
-                    reg_values,
-                    mem_values,
-                    store_addr,
-                    sp_value=sp_value,
-                    sp_affine_mem_offsets=sp_affine_mem_offsets,
-                )
+                store_state = prefix_states.get(store_addr) if prefix_states is not None else None
                 if store_state is None:
                     continue
                 concrete_store_addr = store_state.solver.eval(getattr(store_state.regs, str(store_inst.rs1))) + store_inst.imm
@@ -8021,6 +8351,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         sp_affine_mem_offsets=None,
     ):
         constraints = []
+        prefix_states = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads:
             pointer_vars = getattr(rd_symbol, 'variables', set())
             last_use_idx = load_idx
@@ -8032,13 +8368,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if last_use_idx <= load_idx:
                 continue
             load_addr = original_access_addr(load_idx)
-            load_state = replay_prefix_state(
-                reg_values,
-                mem_values,
-                load_addr,
-                sp_value=sp_value,
-                sp_affine_mem_offsets=sp_affine_mem_offsets,
-            )
+            load_state = prefix_states.get(load_addr) if prefix_states is not None else None
             if load_state is None:
                 continue
             concrete_load_addr = load_state.solver.eval(getattr(load_state.regs, str(load_inst.rs1))) + load_inst.imm
@@ -8047,13 +8377,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if store_idx <= load_idx or store_idx > last_use_idx:
                     continue
                 store_addr = original_access_addr(store_idx)
-                store_state = replay_prefix_state(
-                    reg_values,
-                    mem_values,
-                    store_addr,
-                    sp_value=sp_value,
-                    sp_affine_mem_offsets=sp_affine_mem_offsets,
-                )
+                store_state = prefix_states.get(store_addr) if prefix_states is not None else None
                 if store_state is None:
                     continue
                 concrete_store_addr = store_state.solver.eval(getattr(store_state.regs, str(store_inst.rs1))) + store_inst.imm
@@ -8083,15 +8407,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         sp_affine_mem_offsets=None,
     ):
         constraints = []
+        prefix_states = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
         for inst, addr_symbol, inst_idx, width in mem_accesses:
             access_addr = original_access_addr(inst_idx)
-            access_state = replay_prefix_state(
-                reg_values,
-                mem_values,
-                access_addr,
-                sp_value=sp_value,
-                sp_affine_mem_offsets=sp_affine_mem_offsets,
-            )
+            access_state = prefix_states.get(access_addr) if prefix_states is not None else None
             if access_state is None:
                 continue
 
@@ -8144,19 +8468,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return constraints
 
         concrete_addrs = {}
+        prefix_states = replay_prefix_states(
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+        )
 
         def concrete_load_addr(load_inst, load_idx):
             key = load_idx
             if key in concrete_addrs:
                 return concrete_addrs[key]
             access_addr = original_access_addr(load_idx)
-            state = replay_prefix_state(
-                reg_values,
-                mem_values,
-                access_addr,
-                sp_value=sp_value,
-                sp_affine_mem_offsets=sp_affine_mem_offsets,
-            )
+            state = prefix_states.get(access_addr) if prefix_states is not None else None
             if state is None:
                 concrete_addrs[key] = None
                 return None
