@@ -11721,6 +11721,108 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     related_constraint_keys.add(key)
                     related_constraints.append(constraint)
 
+                def dedupe_related_constraints(constraints):
+                    result = []
+                    seen = set()
+                    for constraint in constraints:
+                        key = str(claripy.simplify(constraint))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append(constraint)
+                    return result
+
+                def residual_constraints_for_target(residual, target, source_vars):
+                    residual_vars = expr_vars(residual)
+                    other_pointer_vars = set(pointer_loaded_addr_vars) - set(source_vars)
+                    if residual_vars & source_vars:
+                        return None
+                    if residual_vars & other_pointer_vars:
+                        return None
+                    forbidden_vars = set(source_vars) | other_pointer_vars
+                    target_value = target_value_for_expr(target, residual)
+                    zero_delta = claripy.simplify(
+                        residual - expr_bvv(target_value, residual)
+                    )
+
+                    candidate_sets = []
+
+                    def add_candidate_set(constraints):
+                        if constraints is None:
+                            return
+                        constraints = dedupe_related_constraints(constraints)
+                        if not constraints:
+                            candidate_sets.append([])
+                            return
+                        candidate_sets.append(constraints)
+
+                    for _, zero_constraints, _ in multiplicative_zero_residual_constraint_options(
+                        zero_delta,
+                        forbidden_vars=forbidden_vars,
+                        direct_pointer_guard=True,
+                        timeout_ms=100 if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD else local_solver_timeout_ms,
+                    ):
+                        add_candidate_set(list(zero_constraints))
+
+                    add_candidate_set(
+                        constraints_to_constant(
+                            zero_delta,
+                            0,
+                            forbidden_vars=forbidden_vars,
+                        )
+                    )
+                    add_candidate_set(
+                        constraints_to_constant(
+                            residual,
+                            target_value,
+                            forbidden_vars=forbidden_vars,
+                        )
+                    )
+
+                    if not candidate_sets:
+                        direct_constraint = residual == expr_bvv(target_value, residual)
+                        sat = constraint_set_related_satisfiable(
+                            [direct_constraint],
+                            residual_vars,
+                            timeout_ms=max(local_solver_timeout_ms, 1000),
+                        )
+                        if sat is not False:
+                            candidate_sets.append([direct_constraint])
+
+                    for constraints in candidate_sets:
+                        if not constraints:
+                            return []
+                        sat = constraint_set_related_satisfiable(
+                            constraints,
+                            residual_vars,
+                            timeout_ms=100 if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD else max(local_solver_timeout_ms, 1000),
+                        )
+                        if sat is not False:
+                            return constraints
+                    return None
+
+                def unresolved_residual_target_candidates(related_inst, related_width, pointer_offset):
+                    candidates = []
+                    seen_targets = set()
+
+                    def add_target(target):
+                        target = _signed_u64(target)
+                        target_key = target & mask
+                        if target_key in seen_targets:
+                            return
+                        seen_targets.add(target_key)
+                        related_offset = pointer_offset - target
+                        if related_offset <= 0 or related_offset > STACK_RANGE:
+                            return
+                        if related_width > 1 and related_offset % related_width:
+                            return
+                        candidates.append(target)
+
+                    add_target(getattr(related_inst, 'imm', 0))
+                    for target in (0, -4, 4, -8, 8, -12, 12, -16, 16, 20, 24, 32):
+                        add_target(target)
+                    return candidates
+
                 for source_expr in source_exprs:
                     source_vars = expr_vars(source_expr)
                     if not source_vars:
@@ -11764,21 +11866,53 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             continue
                         residual_value = current_residual_value(residual)
                         if residual_value is None:
+                            resolved_residual = False
                             if residual_vars & residual_scalar_value_vars:
-                                if os.environ.get("RVMCA_DEBUG_POINTER_VALUE") == "1":
-                                    DEBUG(f"pointer_slot_candidate_reject {({
-                                        'offset': word_offset,
-                                        'expr': str(val_symbol),
-                                        'source': str(source_expr),
-                                        'value': hex(actual_value & ((1 << 64) - 1)),
-                                        'reason': 'unresolved_residual_scalar',
-                                    'pointer_offset': pointer_offset,
-                                    'residual': str(residual),
-                                })}")
-                                return None
+                                for target in unresolved_residual_target_candidates(
+                                    related_inst,
+                                    related_width,
+                                    pointer_offset,
+                                ):
+                                    target_constraints = residual_constraints_for_target(
+                                        residual,
+                                        target,
+                                        source_vars,
+                                    )
+                                    if target_constraints is None:
+                                        continue
+                                    for constraint in target_constraints:
+                                        remember_related_constraint(constraint)
+                                    residual_value = target & ((1 << 64) - 1)
+                                    saw_related_access = True
+                                    resolved_residual = True
+                                    if os.environ.get("RVMCA_DEBUG_POINTER_VALUE") == "1":
+                                        DEBUG(f"pointer_slot_residual_target_selected {({
+                                            'offset': word_offset,
+                                            'expr': str(val_symbol),
+                                            'source': str(source_expr),
+                                            'value': hex(actual_value & ((1 << 64) - 1)),
+                                            'pointer_offset': pointer_offset,
+                                            'target': target,
+                                            'constraints': len(target_constraints),
+                                            'residual': str(residual),
+                                        })}")
+                                    break
+                                if not resolved_residual:
+                                    if os.environ.get("RVMCA_DEBUG_POINTER_VALUE") == "1":
+                                        DEBUG(f"pointer_slot_candidate_reject {({
+                                            'offset': word_offset,
+                                            'expr': str(val_symbol),
+                                            'source': str(source_expr),
+                                            'value': hex(actual_value & ((1 << 64) - 1)),
+                                            'reason': 'unresolved_residual_scalar',
+                                            'pointer_offset': pointer_offset,
+                                            'residual': str(residual),
+                                        })}")
+                                    return None
                             if pointer_offset > STACK_RANGE:
                                 return None
-                            continue
+                            if not resolved_residual:
+                                continue
                         saw_related_access = True
                         residual_imm = _signed_u64(residual_value)
                         if residual_vars:
