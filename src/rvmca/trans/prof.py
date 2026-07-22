@@ -78,6 +78,7 @@ STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD = 6
 STATIC_SYMBOLIC_MUL_NODE_LIMIT = 24
 GLOBAL_NO_OVERLAP_LOAD_THRESHOLD = 16
 GLOBAL_NO_OVERLAP_STORE_THRESHOLD = 12
+EAGER_POINTER_CONSTRAINT_LOAD_THRESHOLD = 64
 MEMORY_DATAFLOW_FORCED_ALIAS_PAIR_BUDGET = 12000
 LONG_BLOCK_ANCHOR_CANDIDATE_LIMIT = 4
 LOAD_SLOT_PRUNE_THRESHOLD = 64
@@ -3511,6 +3512,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         residual_scalar_regs = set()
         loaded_pointer_base_candidate_cache = {}
         local_solver_timeout_ms = 100 if len(mem_accesses) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD else HEURISTIC_SOLVER_TIMEOUT_MS
+        strict_retry_validation = (
+            retry_index > 0
+            and len(mem_entries) <= EAGER_POINTER_CONSTRAINT_LOAD_THRESHOLD
+        )
+        allow_initial_heuristics = (
+            retry_index == 0
+            or len(mem_entries) > EAGER_POINTER_CONSTRAINT_LOAD_THRESHOLD
+        )
         if os.environ.get("RVMCA_DEBUG_LOAD_SLOTS") == "1":
             DEBUG(f"pointer_source_loads {[
                 (load_idx, getattr(load_inst, 'code', str(load_inst)), str(load_addr_symbol), str(rd_symbol))
@@ -4984,7 +4993,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if not full_solver.satisfiable():
                         return False
                 except Exception:
-                    pass
+                    if strict_retry_validation:
+                        return False
 
             for constraint in constraints:
                 candidate_solver.add(constraint)
@@ -4996,6 +5006,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             constraints = list(constraints)
             if not constraints:
                 return True
+            if strict_retry_validation:
+                test_solver = candidate_solver.branch()
+                test_solver.timeout = max(timeout_ms, 1000)
+                try:
+                    for constraint in constraints:
+                        test_solver.add(constraint)
+                    return bool(test_solver.satisfiable())
+                except Exception:
+                    return False
             anchor_vars = expr_vars(init_sp)
             closure = set(seed_vars) - anchor_vars
             for constraint in constraints:
@@ -5057,7 +5076,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 )
             ):
                 return True
-            if use_static_memory_collection:
+            if use_static_memory_collection and allow_related:
                 sat = constraint_set_related_satisfiable(
                     [constraint],
                     seed_vars,
@@ -5895,6 +5914,79 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         def mem_value_expr(inst, rd_symbol):
             return rd_symbol
 
+        def load_value_derived_access_range_constraints(
+            value_expr,
+            load_idx,
+            avoid_existing_load_slots=False,
+            candidate_constraints=None,
+        ):
+            value_vars = expr_vars(value_expr)
+            if not value_vars:
+                return []
+            pending_constraints = list(candidate_constraints or [])
+
+            def same_address_with_pending(addr_a, addr_b):
+                if same_address(addr_a, addr_b, allow_solver=False):
+                    return True
+                if not pending_constraints:
+                    return False
+                affine_a = affine_key(addr_a)
+                affine_b = affine_key(addr_b)
+                if affine_a is None or affine_b is None:
+                    return False
+                if (
+                    affine_a[1] == affine_b[1]
+                    or len(expr_vars(affine_a[2])) != 1
+                    or len(expr_vars(affine_b[2])) != 1
+                ):
+                    return False
+                test_solver = candidate_solver.branch()
+                test_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
+                try:
+                    for constraint in pending_constraints:
+                        test_solver.add(constraint)
+                    test_solver.add(addr_a != addr_b)
+                    return not test_solver.satisfiable()
+                except Exception:
+                    return False
+
+            constraints = []
+            load_access_indices = {
+                candidate_idx
+                for _, _, _, candidate_idx in load_accesses
+            }
+            for _, future_addr_symbol, access_idx, access_width in mem_accesses:
+                if access_idx <= load_idx:
+                    continue
+                if not (expr_vars(future_addr_symbol) & value_vars):
+                    continue
+                offset_expr = init_sp - future_addr_symbol
+                constraints.extend([
+                    claripy.UGE(offset_expr, claripy.BVV(access_width, 64)),
+                    claripy.ULE(offset_expr, claripy.BVV(STACK_RANGE, 64)),
+                ])
+                if access_width > 1:
+                    constraints.append(
+                        (future_addr_symbol & (access_width - 1)) == 0
+                    )
+                if not avoid_existing_load_slots or access_idx not in load_access_indices:
+                    continue
+                for used_offset, used_width, used_addr_symbol in access_ranges:
+                    if same_address_with_pending(
+                        future_addr_symbol,
+                        used_addr_symbol,
+                    ):
+                        continue
+                    constraints.append(
+                        concrete_offset_no_overlap_constraint(
+                            offset_expr,
+                            init_slot_width(access_width),
+                            used_offset,
+                            used_width,
+                        )
+                    )
+            return constraints
+
         def load_raw_value(inst, value_expr):
             bits = inst.width * 8
             return value_expr[bits - 1:0]
@@ -6591,9 +6683,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         for _, addr_symbol, access_idx, _ in mem_accesses
                     )
                     if (
-                        values[0] == 0
-                        and load_inst.width >= 8
+                        load_inst.width >= 8
                         and used_in_later_addr
+                        and (
+                            values[0] == 0
+                            or (rd_vars & pointer_loaded_addr_vars)
+                            or (
+                                load_idx,
+                                stable_expr_key(rd_symbol),
+                            ) in pointer_source_value_keys
+                        )
                     ):
                         continue
                     constraint = rd_symbol == expr_bvv(values[0], rd_symbol)
@@ -9157,8 +9256,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         ],
                     )
                     return concrete_base_value(base_offset)
+                has_materialized_access_offset = any(
+                    (expr_vars(addr_symbol) & symbol_vars)
+                    and expr_key(addr_symbol) in addr_expr_offsets
+                    for _, addr_symbol, _, _ in mem_accesses
+                )
                 direct_simple_long_base_offset = (
+                    allow_initial_heuristics
+                    and
                     len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
+                    and not has_materialized_access_offset
                     and all(ast_node_count(constraint) <= 64 for constraint in constraints)
                 )
                 if direct_simple_long_base_offset:
@@ -9182,6 +9289,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return concrete_base_value(base_offset)
                 simple_long_base_offset = (
                     len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
+                    and not has_materialized_access_offset
                     and len(constraints) <= 8
                     and all(ast_node_count(constraint) <= 64 for constraint in constraints)
                 )
@@ -9342,6 +9450,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 ):
                     return True
                 if (
+                    allow_initial_heuristics
+                    and
                     len(mem_entries) >= GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
                     and all(not residual_constraints for _, _, _, residual_constraints in ranges)
                 ):
@@ -10999,6 +11109,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             })}")
                         return None
                     if (
+                        allow_initial_heuristics
+                        and
                         long_block
                         and simple_long_block_relative_offsets()
                         and get_pointer_store_relative_offsets()
@@ -11610,7 +11722,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             def used_slot_aliases_related_access(used_offset, related_addr_symbol):
                 used_word_offset = ((used_offset + 7) // 8) * 8
                 return any(
-                    same_address(related_addr_symbol, known_addr, allow_solver=True)
+                    same_address(related_addr_symbol, known_addr, allow_solver=False)
                     for known_addr in mem_offset_addr_symbols.get(used_word_offset, [])
                 )
 
@@ -11802,6 +11914,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return None
 
                 def unresolved_residual_target_candidates(related_inst, related_width, pointer_offset):
+                    mask = (1 << 64) - 1
                     candidates = []
                     seen_targets = set()
 
@@ -11994,7 +12107,22 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return None
 
             def pointer_candidate_related_ranges_ok(actual_value):
-                return pointer_candidate_related_constraints(actual_value) is not None
+                related_constraints = pointer_candidate_related_constraints(actual_value)
+                if related_constraints is None:
+                    return False
+                if not strict_retry_validation:
+                    return True
+                candidate_constraints = list(related_constraints) + [
+                    val_symbol == expr_bvv(actual_value, val_symbol),
+                ]
+                candidate_vars = set(expr_vars(val_symbol))
+                for constraint in candidate_constraints:
+                    candidate_vars.update(expr_vars(constraint))
+                return constraint_set_related_satisfiable(
+                    candidate_constraints,
+                    candidate_vars,
+                    timeout_ms=max(local_solver_timeout_ms, 1000),
+                ) is True
 
             def add_pointer_candidate_constraints(actual_value, constraints, seed_vars=None, timeout_ms=None):
                 related_constraints = pointer_candidate_related_constraints(actual_value)
@@ -12850,9 +12978,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 and not slot.get('pointer_like')
                 and not slot.get('sp_affine')
                 and not slot.get('must_be_pointer')
+                and bool(val_vars)
                 and not constrained_slot_value
             ):
                 val = 0
+                if strict_retry_validation:
+                    zero_constraint = val_symbol == expr_bvv(val, val_symbol)
+                    candidate_solver.add(zero_constraint)
+                    added_constraint_cache.add(str(claripy.simplify(zero_constraint)))
+                    debug_constraint_add("unconstrained_slot_zero", zero_constraint)
                 slot['chosen_value'] = val
                 write_stage(
                     "init:materialize_init:memory_values:slot",
@@ -13254,7 +13388,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             debug_affine_choice("failed", attempts=attempts)
             return None
 
-        def choose_pointer_load_addr_offset(addr_symbol, addr_expr, preferred, align, avoid_ranges, width):
+        def choose_pointer_load_addr_offset(
+            addr_symbol,
+            addr_expr,
+            preferred,
+            align,
+            avoid_ranges,
+            width,
+            current_load_value_expr,
+            current_load_idx,
+        ):
             long_block = len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
             if long_block and ast_node_count(addr_symbol) > 512:
                 return None
@@ -14458,9 +14601,55 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 break
                             if not matched_alias:
                                 return False
+                        return add_existing_slot_value_constraints(
+                            access_offset,
+                            candidate_constraints,
+                        )
+
+                    def add_existing_slot_value_constraints(
+                        access_offset,
+                        candidate_constraints,
+                    ):
+                        if current_load_value_expr is None or width != 8 or access_offset % 8:
+                            return False
+                        word_offset = ((access_offset + 7) // 8) * 8
+                        used_slot = mem_slot_symbols.get(word_offset)
+                        if used_slot is None:
+                            return True
+                        prior_value_exprs = []
+                        if 'direct_value_expr' in used_slot:
+                            prior_value_exprs.append(used_slot['direct_value_expr'])
+                        prior_value_exprs.extend(used_slot.get('value_exprs', []))
+                        existing_constraint_keys = {
+                            str(claripy.simplify(constraint))
+                            for constraint in candidate_constraints
+                        }
+                        for prior_value_expr in prior_value_exprs:
+                            equality_constraint = current_load_value_expr == prior_value_expr
+                            equality_key = str(claripy.simplify(equality_constraint))
+                            if equality_key in existing_constraint_keys:
+                                continue
+                            existing_constraint_keys.add(equality_key)
+                            candidate_constraints.append(equality_constraint)
+                        for range_constraint in load_value_derived_access_range_constraints(
+                            current_load_value_expr,
+                            current_load_idx,
+                            avoid_existing_load_slots=True,
+                            candidate_constraints=candidate_constraints,
+                        ):
+                            range_key = str(claripy.simplify(range_constraint))
+                            if range_key in existing_constraint_keys:
+                                continue
+                            existing_constraint_keys.add(range_key)
+                            candidate_constraints.append(range_constraint)
                         return True
 
-                    def overlap_is_existing_pointer_slot_alias(access_offset, overlap_ranges, record=True):
+                    def overlap_is_existing_pointer_slot_alias(
+                        access_offset,
+                        overlap_ranges,
+                        candidate_constraints=None,
+                        record=True,
+                    ):
                         try:
                             current_is_pointer_like = bool(current_pointer_like_load)
                         except NameError:
@@ -14491,6 +14680,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 )
                             ):
                                 return False
+                        if (
+                            candidate_constraints is not None
+                            and not add_existing_slot_value_constraints(
+                                access_offset,
+                                candidate_constraints,
+                            )
+                        ):
+                            return False
                         if record:
                             allowed_pointer_slot_alias_offsets.add(access_offset)
                         return True
@@ -14599,7 +14796,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                         access_offset=access_offset,
                                         overlaps=overlap_ranges,
                                     )
-                                elif overlap_is_existing_pointer_slot_alias(access_offset, overlap_ranges):
+                                elif overlap_is_existing_pointer_slot_alias(
+                                    access_offset,
+                                    overlap_ranges,
+                                    candidate_constraints=constraints,
+                                ):
                                     debug_pointer_choice(
                                         "allow_existing_pointer_slot_alias",
                                         access_offset=access_offset,
@@ -15328,10 +15529,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         add_same_address_load_alias_constraints()
         debug_check_stage("same_address_load_alias")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_scalar_offsets")
-        add_loaded_pointer_scalar_offset_constraints()
+        if retry_index > 0 or len(mem_entries) > EAGER_POINTER_CONSTRAINT_LOAD_THRESHOLD:
+            add_loaded_pointer_scalar_offset_constraints()
         debug_check_stage("loaded_pointer_scalar_offsets")
         _write_profile_stage(name, "init:materialize_init:global_constraints:loaded_pointer_residual_anchor")
-        add_loaded_pointer_residual_anchor_constraints()
+        if retry_index > 0 or len(mem_entries) > EAGER_POINTER_CONSTRAINT_LOAD_THRESHOLD:
+            add_loaded_pointer_residual_anchor_constraints()
         debug_check_stage("loaded_pointer_residual_anchor")
         _write_profile_stage(name, "init:materialize_init:global_constraints:livein_base_residual_anchor")
         add_livein_base_residual_anchor_constraints()
@@ -17020,8 +17223,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def load_value_is_pointer_source_residual_scalar(rd_symbol, load_idx):
             rd_vars = expr_vars(rd_symbol)
-            if not rd_vars or load_idx in pointer_source_indices:
+            if not rd_vars:
                 return False
+            current_is_pointer_source = load_idx in pointer_source_indices
             zero_constraints = constraints_to_constant(rd_symbol, 0)
             if zero_constraints is None:
                 return False
@@ -17036,12 +17240,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 for _, pointer_rd_symbol, _, pointer_idx in pointer_source_loads:
                     if pointer_idx >= access_idx:
                         continue
+                    if current_is_pointer_source and pointer_idx <= load_idx:
+                        continue
                     pointer_vars = expr_vars(pointer_rd_symbol)
                     if not pointer_vars or pointer_vars & rd_vars:
                         continue
                     if not (addr_vars & pointer_vars):
                         continue
                     residual = sub_same_width(addr_symbol, pointer_rd_symbol)
+                    if residual is None:
+                        residual = additive_residual_without_term(
+                            addr_symbol,
+                            pointer_rd_symbol,
+                        )
                     if residual is None:
                         continue
                     residual_vars = expr_vars(residual)
@@ -17355,10 +17566,62 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
 
         def load_slot_priority(entry):
-            inst, rd_symbol, _, inst_idx = entry
+            inst, rd_symbol, addr_symbol, inst_idx = entry
             if inst.width < 8 and is_scalar_zero_address_load(inst, rd_symbol, inst_idx):
                 return 0
             if load_slot_entry_pointer_like(entry):
+                if retry_index > 0:
+                    def rigid_affine_base_producer(candidate_entry):
+                        _, _, candidate_addr, candidate_idx = candidate_entry
+                        candidate_affine = affine_key(candidate_addr)
+                        if (
+                            candidate_affine is None
+                            or candidate_affine[1] == 0
+                            or not (
+                                expr_vars(candidate_affine[2])
+                                & (pointer_loaded_addr_vars | address_loaded_addr_vars)
+                            )
+                        ):
+                            return None
+                        candidate_base_vars = expr_vars(candidate_affine[2])
+                        producer = next((
+                            producer_entry
+                            for producer_entry in mem_entries
+                            if producer_entry[3] < candidate_idx
+                            and expr_vars(producer_entry[1]) & candidate_base_vars
+                        ), None)
+                        if (
+                            producer is None
+                            or expr_vars(producer[2])
+                            & (pointer_loaded_addr_vars | address_loaded_addr_vars)
+                        ):
+                            return None
+                        return producer
+
+                    addr_affine = affine_key(addr_symbol)
+                    base_vars = expr_vars(addr_affine[2]) if addr_affine is not None else set()
+                    base_producer = next((
+                        producer_entry
+                        for producer_entry in mem_entries
+                        if producer_entry[3] < inst_idx
+                        and expr_vars(producer_entry[1]) & base_vars
+                    ), None)
+                    rigid_producer = rigid_affine_base_producer(entry)
+                    if rigid_producer is not None:
+                        return -2
+                    if base_producer is not None:
+                        for later_entry in mem_entries:
+                            if later_entry[3] <= inst_idx:
+                                continue
+                            later_producer = rigid_affine_base_producer(later_entry)
+                            if later_producer is None:
+                                continue
+                            if same_address(
+                                base_producer[2],
+                                later_producer[2],
+                                allow_solver=False,
+                            ):
+                                return -1
                 return 0
             if (
                 inst.width == 8
@@ -18483,6 +18746,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return False
                 if not candidate_keeps_affine_group_available(addr):
                     return False
+                constraint = addr_expr == claripy.BVV(
+                    addr & ((1 << addr_expr.size()) - 1),
+                    addr_expr.size(),
+                )
+                commit_constraints = [constraint]
+                slot_value_equalities = []
                 word_offset = ((addr + 7) // 8) * 8
                 byte_offset = word_offset - addr
                 existing_slot = mem_slot_symbols.get(word_offset)
@@ -18491,72 +18760,50 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     and inst.width == 8
                     and byte_offset == 0
                 ):
-                    must_alias_same_slot_value = same_slot_value_must_alias(word_offset, byte_offset)
+                    must_alias_same_slot_value = same_slot_value_must_alias(
+                        word_offset,
+                        byte_offset,
+                    )
                     current_value_expr = mem_value_expr(inst, rd_symbol)
                     prior_value_exprs = []
                     if 'direct_value_expr' in existing_slot:
                         prior_value_exprs.append(existing_slot['direct_value_expr'])
                     prior_value_exprs.extend(existing_slot.get('value_exprs', []))
-                    value_compatible = True
-                    value_constraints = [
-                        addr_expr == claripy.BVV(addr & ((1 << addr_expr.size()) - 1), addr_expr.size())
-                    ]
                     for prior_value_expr in prior_value_exprs:
                         equality_constraint = current_value_expr == prior_value_expr
-                        check_constraints = value_constraints + [equality_constraint]
-                        value_conflict_timeout_ms = (
-                            max(100, timeout_ms or local_solver_timeout_ms)
-                            if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
-                            else max(1000, timeout_ms or 1000)
+                        commit_constraints.append(equality_constraint)
+                        slot_value_equalities.append((current_value_expr, prior_value_expr))
+                    if slot_value_equalities:
+                        commit_constraints.extend(
+                            load_value_derived_access_range_constraints(
+                                current_value_expr,
+                                inst_idx,
+                                avoid_existing_load_slots=not must_alias_same_slot_value,
+                                candidate_constraints=commit_constraints,
+                            )
                         )
-                        related_sat = constraint_set_related_satisfiable(
-                            check_constraints,
-                            expr_vars(addr_expr) | expr_vars(current_value_expr) | expr_vars(prior_value_expr),
-                            timeout_ms=value_conflict_timeout_ms,
-                        )
-                        if related_sat is False:
-                            if must_alias_same_slot_value:
-                                full_sat = constraint_set_selection_satisfiable(
-                                    check_constraints,
-                                    timeout_ms=(
-                                        max(500, timeout_ms or local_solver_timeout_ms)
-                                        if len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
-                                        else max(5000, timeout_ms or 1000)
-                                    ),
-                                )
-                                if full_sat is not False:
-                                    debug_load_slot_choice(
-                                        "allow_forced_same_value",
-                                        candidate_offset=addr,
-                                        word_offset=word_offset,
-                                        current=str(current_value_expr),
-                                        prior=str(prior_value_expr),
-                                        full_sat=full_sat,
-                                    )
-                                    continue
-                            value_compatible = False
-                            if os.environ.get("RVMCA_DEBUG_LOAD_SLOTS") == "1":
-                                DEBUG(f"load_slot_reject_value_conflict {({
-                                    'idx': inst_idx,
-                                    'inst': getattr(inst, 'code', str(inst)),
-                                    'candidate_offset': addr,
-                                    'word_offset': word_offset,
-                                    'current': str(current_value_expr),
-                                    'prior': str(prior_value_expr),
-                                })}")
-                            break
-                    if not value_compatible:
-                        return False
                 timeout_ms = (
                     1000
                     if timeout_ms is None and len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                     else (local_solver_timeout_ms if timeout_ms is None else timeout_ms)
                 )
-                constraint = addr_expr == claripy.BVV(addr & ((1 << addr_expr.size()) - 1), addr_expr.size())
-                if try_add_constraint_set_fast([constraint], timeout_ms=timeout_ms):
+                if try_add_constraint_set_fast(commit_constraints, timeout_ms=timeout_ms):
+                    for current_value_expr, prior_value_expr in slot_value_equalities:
+                        register_expr_equality(current_value_expr, prior_value_expr)
                     remember_committed_addr_offset()
                     debug_load_slot_choice("commit_fast", candidate_offset=addr)
                     return True
+                if slot_value_equalities:
+                    if os.environ.get("RVMCA_DEBUG_LOAD_SLOTS") == "1":
+                        DEBUG(f"load_slot_reject_value_conflict {({
+                            'idx': inst_idx,
+                            'inst': getattr(inst, 'code', str(inst)),
+                            'candidate_offset': addr,
+                            'word_offset': word_offset,
+                            'current': str(slot_value_equalities[0][0]),
+                            'prior': [str(prior) for _, prior in slot_value_equalities],
+                        })}")
+                    return False
                 if (
                     len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                     and not force_exact_load_slot
@@ -18564,7 +18811,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     debug_load_slot_choice("reject_fast_unsat", candidate_offset=addr)
                     return False
                 related_ok = try_add_constraint_set_related(
-                    [constraint],
+                    commit_constraints,
                     expr_vars(addr_expr),
                     timeout_ms=max(timeout_ms, 1000),
                 )
@@ -18907,6 +19154,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 inst.width if inst.width > 1 else None,
                                 avoid_ranges,
                                 access_width,
+                                mem_value_expr(inst, rd_symbol),
+                                inst_idx,
                             )
                         write_stage(
                             "init:materialize_init:load_slots:entry",
@@ -18941,6 +19190,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             inst.width if inst.width > 1 else None,
                             avoid_ranges,
                             access_width,
+                            mem_value_expr(inst, rd_symbol),
+                            inst_idx,
                         )
                     if (
                         addr is None
@@ -18986,6 +19237,42 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             )
                             ):
                                 addr = preferred_offset
+                    if (
+                        addr is None
+                        and prefer_pointer_load_addr_solver
+                        and not skip_low_loaded_residual_fallback
+                    ):
+                        pointer_model_offsets = solver_eval_current(
+                            addr_expr,
+                            n=8,
+                            timeout_ms=5000,
+                        )
+                        if os.environ.get("RVMCA_DEBUG_LOAD_SLOTS") == "1":
+                            DEBUG(
+                                f"pointer_model_offsets idx={inst_idx} "
+                                f"values={[hex(value & ((1 << addr_expr.size()) - 1)) for value in pointer_model_offsets]}"
+                            )
+                        seen_model_offsets = set()
+                        for model_offset in pointer_model_offsets:
+                            model_offset &= ((1 << addr_expr.size()) - 1)
+                            if model_offset in seen_model_offsets:
+                                continue
+                            seen_model_offsets.add(model_offset)
+                            if model_offset <= 0 or model_offset > STACK_RANGE:
+                                continue
+                            if inst.width > 1 and model_offset % inst.width:
+                                continue
+                            if commit_load_addr_constraint(
+                                model_offset,
+                                timeout_ms=5000,
+                            ):
+                                addr = model_offset
+                                addr_expr_offsets[addr_key] = addr
+                                debug_load_slot_choice(
+                                    "commit_pointer_model_offset",
+                                    candidate_offset=addr,
+                                )
+                                break
                     if (
                         addr is None
                         and skip_low_loaded_residual_fallback
@@ -19266,6 +19553,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             value_is_store_address_base = (
                 value_feeds_store_addr
                 and not value_is_additive_offset_to_live_base
+                and not value_is_pointer_source_residual_scalar
                 and not value_feeds_forwarded_address_scalar
             )
             if value_is_store_address_base:
@@ -19473,6 +19761,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 nonadditive_zero_added = commit_scalar_zero_constraint(
                     value_expr,
                     timeout_ms=max(local_solver_timeout_ms, 1000),
+                    assume_unknown=False,
+                    allow_related=False,
                 )
                 if nonadditive_zero_added:
                     slot['scalar_zero'] = True
@@ -19628,6 +19918,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 and byte_offset == 0
                 and value_used_in_later_addr
                 and value_vars & pointer_loaded_addr_vars
+                and not value_is_pointer_source_residual_scalar
                 and not value_is_scaled_address_scalar
             ):
                 mem_slot_symbols[word_offset]['pointer_like'] = True
@@ -19652,7 +19943,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         mem_slot_symbols[word_offset]['min_pointer_offset'],
                         INIT_PTR_MIN_OFFSET,
                     )
-                if value_vars & pointer_loaded_addr_vars and not value_is_scaled_address_scalar:
+                if (
+                    value_vars & pointer_loaded_addr_vars
+                    and not value_is_pointer_source_residual_scalar
+                    and not value_is_scaled_address_scalar
+                ):
                     mem_slot_symbols[word_offset]['pointer_like'] = True
                     if value_used_in_later_addr:
                         mem_slot_symbols[word_offset]['must_be_pointer'] = True
@@ -20198,6 +20493,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     def find_replay_access_constraints(
         reg_values,
         mem_values,
+        constraint_solver,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
     ):
@@ -20229,6 +20525,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         protected_idx = last_prefix_fail_info.get('protected_access_idx')
         protected_offset_text = last_prefix_fail_info.get('protected_access_offset')
+        protected_kind = last_prefix_fail_info.get('protected_access_kind')
         failed_access_idx = last_prefix_fail_info.get('inst_idx')
         if failed_access_idx is not None:
             failed_pointer_load_indices = []
@@ -20333,32 +20630,24 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if width > 1:
                         constraints.append((addr_symbol & (width - 1)) == 0)
 
-                    candidate_offsets = []
-                    align = width if width > 1 else 1
-                    if protected_offset <= 0 or protected_offset > STACK_RANGE:
-                        high_offsets = [0xc00, 0x800, 0x400, STACK_RANGE]
-                        for high_offset in high_offsets:
-                            candidate_offsets.append(high_offset - (high_offset % align))
-                        candidate_offsets.append(max(width, align))
-                    elif width > 1 and protected_offset % width:
-                        lower = protected_offset - (protected_offset % width)
-                        upper = lower + width
-                        candidate_offsets.extend([upper, lower])
-                    else:
-                        candidate_offsets.append(protected_offset)
-                    seen_candidate_offsets = set()
-                    for target_offset in candidate_offsets:
-                        if target_offset in seen_candidate_offsets:
-                            continue
-                        seen_candidate_offsets.add(target_offset)
-                        if target_offset <= 0 or target_offset > STACK_RANGE:
-                            continue
-                        if align > 1 and target_offset % align:
-                            continue
-                        constraints.append(
-                            offset_expr == claripy.BVV(target_offset & ((1 << 64) - 1), 64)
-                        )
-                        break
+                    if protected_kind == 'store':
+                        for load_inst, _, load_addr_symbol, load_idx in mem_entries:
+                            if load_idx <= inst_idx:
+                                continue
+                            if forced_same_address(
+                                addr_symbol,
+                                load_addr_symbol,
+                                constraint_solver,
+                            ):
+                                continue
+                            constraints.append(
+                                symbolic_access_no_overlap(
+                                    addr_symbol,
+                                    width,
+                                    load_addr_symbol,
+                                    init_slot_width(load_inst.width),
+                                )
+                            )
                     break
 
         return constraints
@@ -20633,6 +20922,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 )
             )
             if retryable_materialize_failure and retry < MAX_INIT_SOLVE_RETRIES:
+                if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                    DEBUG(f"materialize_retry retry={retry} error={message}")
                 _write_profile_stage(
                     name,
                     f"init:solve_retry_{retry}:materialize_retry",
@@ -20733,6 +21024,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         alias_constraints.extend(find_replay_access_constraints(
             reg_values,
             mem_values,
+            current_solver,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
         ))

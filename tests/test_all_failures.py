@@ -210,7 +210,38 @@ def run_single_block(
         args=(result_queue, block_id, asm_raw, verbose),
     )
     process.start()
-    process.join(timeout_s)
+
+    # Drain the queue while the worker is running.  Joining first can deadlock
+    # a worker in the multiprocessing.Queue feeder when several blocks are
+    # forked concurrently, even though transform_for_profiling has completed.
+    deadline = time.monotonic() + timeout_s
+    result = None
+    got_result = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = result_queue.get(timeout=min(0.2, remaining))
+            got_result = True
+            break
+        except queue.Empty:
+            if not process.is_alive():
+                break
+
+    if got_result:
+        process.join(5)
+        if process.is_alive():
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                process.terminate()
+            process.join(5)
+        return result
+
+    process.join(0)
 
     if process.is_alive():
         safe_id = block_id.replace("/", "_").replace(".", "_")
