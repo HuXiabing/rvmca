@@ -468,3 +468,53 @@ blocks still pass, with zero regression. This result only establishes the
 regression precondition. Its SPEC06 benefit will be counted separately and
 only as original `failed -> PASS` transitions after the frozen 2375-ID baseline
 is complete; `failed -> SKIP` will not be counted as an improvement.
+
+## Confirmed Original Failed-to-PASS Lower Bound
+
+The completed frozen baseline records already establish that the following nine
+reviewed blocks all had original status `failed`:
+
+```text
+400.perlbench_2554
+403.gcc_15826
+403.gcc_23083
+403.gcc_51922
+403.gcc_51924
+403.gcc_53786
+403.gcc_56309
+403.gcc_56742
+403.gcc_59659
+```
+
+They were retested together with the exact production profiler SHA-256 used by
+the historical gate. All nine passed transform, alternate-SP concrete replay,
+assembly, and the real QEMU pp command:
+
+```text
+original failed -> PASS  9
+original failed -> SKIP  0
+original failed -> FAIL  0
+original failed -> TIMEOUT  0
+```
+
+The fixed input set is
+`tests/failure_reports/id_sets/spec06_reviewed_failed_9.ids`; the generated
+report is
+`tests/failure_reports/spec06_e478f54_reviewed_failed_9/status.json`. This is a
+verified lower bound, not the final benefit count. The full 2375-ID current-code
+run must still complete before the batch-wide transition total is reported.
+
+## Frozen-Baseline Status Drift Note
+
+For every fully reconstructed benchmark before Gamess, the frozen status counts
+matched the original processing log exactly. Gamess preserved all 7,864
+nonpassing IDs but reconstructed them as 104 failed and 21 timeout, while the
+original run reported 109 failed and 16 timeout. Thus five solver-budget cases
+changed labels between `failed` and `timeout`; no ID became PASS or SKIP.
+
+The original generator deleted its per-block checkpoint after writing the final
+JSON, and the final JSON stores all failed, skipped, and timeout outcomes as the
+same three null fields. The exact original labels for those five cases are
+therefore not recoverable from the final output. Later transition reports must
+list this ambiguity separately and must not count a mere failed/timeout label
+change as a repair.
