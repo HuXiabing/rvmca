@@ -113,3 +113,50 @@ def test_load_records_accepts_final_and_partial_formats(tmp_path):
 
     assert analyzer.load_records(final_path) == rows
     assert analyzer.load_records(partial_path) == rows
+
+
+def test_reviewed_witness_can_promote_failed_block_to_fixable(tmp_path):
+    review_path = tmp_path / "reviews.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "reviews": [
+                    {
+                        "id": "400.perlbench_1",
+                        "classification": "fixable",
+                        "pattern": "scaled_loaded_value_fixed_residual",
+                        "evidence_kind": "qemu_witness",
+                        "evidence": "manual runtime-SP initial completed QEMU",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    reviews = analyzer.load_reviews(review_path)
+
+    analyzed = analyzer.analyze_record(
+        record(error="concrete replay fails"),
+        reviews=reviews,
+    )
+
+    assert analyzed["feasibility"] == "fixable"
+    assert analyzed["reviewed"] is True
+    assert analyzed["reviewed_pattern"] == "scaled_loaded_value_fixed_residual"
+
+
+def test_reviews_reject_duplicate_ids(tmp_path):
+    review_path = tmp_path / "reviews.json"
+    row = {
+        "id": "400.perlbench_1",
+        "classification": "fixable",
+        "evidence": "witness",
+    }
+    review_path.write_text(json.dumps({"reviews": [row, row]}), encoding="utf-8")
+
+    try:
+        analyzer.load_reviews(review_path)
+    except ValueError as exc:
+        assert "duplicate review" in str(exc)
+    else:
+        raise AssertionError("duplicate feasibility reviews must be rejected")

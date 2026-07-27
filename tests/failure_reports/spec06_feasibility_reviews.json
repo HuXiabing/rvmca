@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "reviews": [
+    {
+      "id": "400.perlbench_2554",
+      "classification": "fixable",
+      "pattern": "scaled_loaded_value_fixed_residual",
+      "evidence_kind": "qemu_witness",
+      "evidence": "A runtime-SP initial using (sp - 0x458) >> 3 assembled and completed the real QEMU pp run with cycles: 12.",
+      "has_valid_initial": true,
+      "baseline_failure": "replay_range_failure",
+      "diagnosed_at_commit": "58ebd71",
+      "qemu_exit_code": 0,
+      "qemu_cycles": 12,
+      "witness_init_asm": [
+        "li x31, 0x458",
+        "sub x31, sp, x31",
+        "srli x31, x31, 3",
+        "li x27, 8",
+        "sub x27, sp, x27",
+        "sd x31, 0(x27)",
+        "li x31, 0",
+        "li x27, 0x100",
+        "sub x27, sp, x27",
+        "sd x31, 0(x27)",
+        "li x5, 56",
+        "sub x5, sp, x5",
+        "li x26, 0"
+      ]
+    }
+  ]
+}

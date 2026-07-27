@@ -18,6 +18,8 @@ DEFAULT_OUTPUT_JSON = TESTS_DIR / "failure_reports" / "spec06_patterns.json"
 DEFAULT_OUTPUT_CSV = TESTS_DIR / "failure_reports" / "spec06_patterns.csv"
 DEFAULT_OUTPUT_MD = TESTS_DIR.parent / "docs" / "spec06_failed_timeout_patterns.md"
 DEFAULT_IDS_DIR = TESTS_DIR / "failure_reports" / "spec06_pattern_ids"
+DEFAULT_REVIEWS = TESTS_DIR / "failure_reports" / "spec06_feasibility_reviews.json"
+FEASIBILITY_CLASSES = {"pass_witness", "fixable", "skip_proven", "unknown"}
 
 LOAD_WIDTHS = {
     "lb": 1,
@@ -85,6 +87,35 @@ def load_records(path: Path) -> List[Dict[str, Any]]:
     if not all(isinstance(item, dict) for item in records):
         raise ValueError(f"{path} contains a non-object record")
     return records
+
+
+def load_reviews(path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    if path is None or not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows = data.get("reviews") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError(f"{path} does not contain a reviews list")
+
+    reviews = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"review {index} in {path} is not an object")
+        block_id = row.get("id")
+        classification = row.get("classification")
+        evidence = row.get("evidence")
+        if not isinstance(block_id, str) or not block_id:
+            raise ValueError(f"review {index} in {path} has no block id")
+        if block_id in reviews:
+            raise ValueError(f"duplicate review for {block_id} in {path}")
+        if classification not in FEASIBILITY_CLASSES:
+            raise ValueError(
+                f"invalid feasibility classification {classification!r} for {block_id}"
+            )
+        if not isinstance(evidence, str) or not evidence:
+            raise ValueError(f"review for {block_id} has no evidence")
+        reviews[block_id] = row
+    return reviews
 
 
 def normalized_stage(record: Dict[str, Any]) -> str:
@@ -326,11 +357,20 @@ def structural_signature(pattern: str, stage: str, features: Dict[str, Any]) -> 
     )
 
 
-def analyze_record(record: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_record(
+    record: Dict[str, Any],
+    reviews: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     pattern = failure_pattern(record)
     stage = normalized_stage(record)
     features = assembly_features(str(record.get("asm") or ""))
     feasibility_result = feasibility(record)
+    review = (reviews or {}).get(str(record.get("id") or ""))
+    if review is not None:
+        feasibility_result = {
+            "classification": str(review["classification"]),
+            "evidence": str(review["evidence"]),
+        }
     return {
         "key": record.get("key"),
         "source_file": record.get("source_file"),
@@ -342,6 +382,9 @@ def analyze_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "normalized_stage": stage,
         "feasibility": feasibility_result["classification"],
         "feasibility_evidence": feasibility_result["evidence"],
+        "reviewed": review is not None,
+        "reviewed_pattern": review.get("pattern") if review else None,
+        "review_evidence_kind": review.get("evidence_kind") if review else None,
         "error_signature": normalized_error_signature(record),
         "structural_signature": structural_signature(pattern, stage, features),
         "features": features,
@@ -488,6 +531,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV)
     parser.add_argument("--output-md", type=Path, default=DEFAULT_OUTPUT_MD)
     parser.add_argument("--ids-dir", type=Path, default=DEFAULT_IDS_DIR)
+    parser.add_argument("--reviews", type=Path, default=DEFAULT_REVIEWS)
     parser.add_argument(
         "--status",
         action="append",
@@ -501,10 +545,11 @@ def main() -> int:
     args = parse_args()
     input_path = args.input or resolve_default_input(args.report_dir)
     records = load_records(input_path)
+    reviews = load_reviews(args.reviews)
     if args.status:
         wanted = set(args.status)
         records = [record for record in records if record.get("status") in wanted]
-    analyzed = [analyze_record(record) for record in records]
+    analyzed = [analyze_record(record, reviews=reviews) for record in records]
     summary = summarize(analyzed)
     write_outputs(
         analyzed,
