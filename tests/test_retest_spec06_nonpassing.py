@@ -4,8 +4,10 @@ import pytest
 
 from retest_spec06_nonpassing import (
     classify_failure,
+    load_wanted_ids,
     load_partial,
     result_state,
+    select_cases_by_ids,
     summarize,
     validate_source_block,
 )
@@ -88,6 +90,30 @@ def test_load_partial_uses_latest_record(tmp_path):
     assert load_partial(partial) == {
         "case.json:1": {"key": "case.json:1", "status": "passed"}
     }
+
+
+def test_id_file_selection_is_exact(tmp_path):
+    ids_path = tmp_path / "blocks.ids"
+    ids_path.write_text("# pattern\n403.gcc_2\n403.gcc_1\n", encoding="utf-8")
+    cases = [
+        {"id": "403.gcc_1"},
+        {"id": "403.gcc_2"},
+        {"id": "403.gcc_3"},
+    ]
+
+    wanted = load_wanted_ids(ids_path)
+    assert select_cases_by_ids(cases, wanted) == cases[:2]
+
+    with pytest.raises(ValueError, match="not found"):
+        select_cases_by_ids(cases, {"403.gcc_missing"})
+
+
+def test_id_file_rejects_duplicates(tmp_path):
+    ids_path = tmp_path / "blocks.ids"
+    ids_path.write_text("403.gcc_1\n403.gcc_1\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate IDs"):
+        load_wanted_ids(ids_path)
 
 
 def test_summarize_reports_status_failure_stage_and_benchmark():

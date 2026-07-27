@@ -89,6 +89,33 @@ def validate_source_block(
         )
 
 
+def load_wanted_ids(path: Path) -> set[str]:
+    values = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    values = [value for value in values if value and not value.startswith("#")]
+    if not values:
+        raise ValueError(f"ID file is empty: {path}")
+    duplicates = sorted(
+        value for value, count in Counter(values).items() if count > 1
+    )
+    if duplicates:
+        raise ValueError(f"duplicate IDs in {path}: {', '.join(duplicates)}")
+    return set(values)
+
+
+def select_cases_by_ids(
+    cases: List[Dict[str, Any]],
+    wanted_ids: set[str],
+) -> List[Dict[str, Any]]:
+    available = {str(case.get("id")) for case in cases}
+    missing = wanted_ids - available
+    if missing:
+        raise ValueError(
+            "requested non-passing block IDs not found: "
+            + ", ".join(sorted(missing))
+        )
+    return [case for case in cases if str(case.get("id")) in wanted_ids]
+
+
 def discover_cases(
     input_dir: Path,
     baseline_dir: Path,
@@ -370,6 +397,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--file", action="append", help="only inspect this source filename")
+    parser.add_argument("--ids-file", type=Path, help="only retest block IDs listed in this file")
     parser.add_argument("--list-only", action="store_true")
     parser.add_argument(
         "--retry-status",
@@ -394,6 +422,9 @@ def main() -> int:
         args.baseline_dir,
         set(args.file) if args.file else None,
     )
+    wanted_ids = load_wanted_ids(args.ids_file) if args.ids_file else None
+    if wanted_ids is not None:
+        cases = select_cases_by_ids(cases, wanted_ids)
     all_candidate_count = len(cases)
     if args.limit is not None:
         if args.limit <= 0:
@@ -420,6 +451,7 @@ def main() -> int:
         "all_candidate_count": all_candidate_count,
         "selected_candidate_count": len(cases),
         "selected_files": sorted(args.file) if args.file else None,
+        "selected_ids": sorted(wanted_ids) if wanted_ids is not None else None,
         "limit": args.limit,
         "files": files,
     }

@@ -84,6 +84,78 @@ LONG_BLOCK_ANCHOR_CANDIDATE_LIMIT = 4
 LOAD_SLOT_PRUNE_THRESHOLD = 64
 HEURISTIC_SOLVER_TIMEOUT_MS = 500
 ENABLE_POINTER_LOAD_ANCHORS = False
+RUNTIME_SP_ALIGNMENT = 16
+MAX_AFFINE_QUOTIENT_SCALE = 256
+
+
+def _scaled_stack_transform_for_value(
+    value: int,
+    sp_value: int = CONCRETE_REPLAY_SP,
+    max_offset: int = STACK_RANGE,
+):
+    """Return the runtime-SP recipe whose shifted value matches ``value``."""
+    value &= (1 << 64) - 1
+    for shift in range(1, 5):
+        shifted = (value << shift) & ((1 << 64) - 1)
+        offset = (sp_value - shifted) & ((1 << 64) - 1)
+        if offset <= max_offset and ((sp_value - offset) & ((1 << 64) - 1)) == shifted:
+            return offset, shift
+        offset = (shifted - sp_value) & ((1 << 64) - 1)
+        if offset <= max_offset and ((sp_value + offset) & ((1 << 64) - 1)) == shifted:
+            return -offset, shift
+    return None
+
+
+def _remap_sp_affine_mem_value(value: int, sp_value: int, recipe) -> int:
+    """Materialize a memory value from its runtime-SP dependency recipe."""
+    mask = (1 << 64) - 1
+    value &= mask
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 3
+        and recipe[0] == 'affine_quotient'
+    ):
+        return _affine_quotient_value(sp_value, recipe)
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 3
+        and recipe[0] == 'scaled'
+    ):
+        offset, shift = int(recipe[1]), int(recipe[2])
+        shifted = (sp_value - offset) & mask
+        return shifted >> shift
+    if recipe == 'inverse':
+        return (value + ((CONCRETE_REPLAY_SP - sp_value) & mask)) & mask
+    return (sp_value + ((value - CONCRETE_REPLAY_SP) & mask)) & mask
+
+
+def _affine_quotient_value(sp_value: int, recipe) -> int:
+    """Evaluate ``(sp - offset) / scale`` for a proven runtime recipe."""
+    if (
+        not isinstance(recipe, (tuple, list))
+        or len(recipe) != 3
+        or recipe[0] != 'affine_quotient'
+    ):
+        raise ValueError(f"invalid affine quotient recipe: {recipe!r}")
+    offset, scale = int(recipe[1]), int(recipe[2])
+    if scale <= 1:
+        raise ValueError(f"invalid affine quotient scale: {scale}")
+    return ((sp_value - offset) & ((1 << 64) - 1)) // scale
+
+
+def _affine_quotient_remainders(
+    offset: int,
+    scale: int,
+    sp_alignment: int = RUNTIME_SP_ALIGNMENT,
+):
+    """Return all division remainders possible for aligned runtime SP values."""
+    if scale <= 1 or sp_alignment <= 0:
+        return ()
+    period = math.lcm(scale, sp_alignment)
+    return tuple(sorted({
+        (sp_residue - offset) % scale
+        for sp_residue in range(0, period, sp_alignment)
+    }))
 
 
 class UnsupportedBlockError(RuntimeError):
@@ -826,23 +898,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         return None
 
-    def scaled_stack_transform_for_value(value: int, sp_value: int = CONCRETE_REPLAY_SP):
-        value &= (1 << 64) - 1
-        for shift in range(1, 5):
-            shifted = (value << shift) & ((1 << 64) - 1)
-            offset = (sp_value - shifted) & ((1 << 64) - 1)
-            if (
-                offset <= STACK_RANGE
-                and ((sp_value - offset) & ((1 << 64) - 1)) == shifted
-            ):
-                return offset, shift
-            offset = (shifted - sp_value) & ((1 << 64) - 1)
-            if (
-                offset <= STACK_RANGE
-                and ((sp_value + offset) & ((1 << 64) - 1)) == shifted
-            ):
-                return -offset, shift
-        return None
+    def scaled_stack_transform_for_value(
+        value: int,
+        sp_value: int = CONCRETE_REPLAY_SP,
+        max_offset: int = STACK_RANGE,
+    ):
+        return _scaled_stack_transform_for_value(value, sp_value, max_offset)
 
     def remap_sp_relative_value(value: int, from_sp: int, to_sp: int, allow_scaled_stack: bool = False) -> int:
         value &= (1 << 64) - 1
@@ -873,11 +934,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return 'direct'
         return None
 
-    def remap_sp_affine_mem_value(value: int, sp_value: int, mode: str) -> int:
-        value &= (1 << 64) - 1
-        if mode == 'inverse':
-            return (value + ((CONCRETE_REPLAY_SP - sp_value) & ((1 << 64) - 1))) & ((1 << 64) - 1)
-        return (sp_value + ((value - CONCRETE_REPLAY_SP) & ((1 << 64) - 1))) & ((1 << 64) - 1)
+    def remap_sp_affine_mem_value(value: int, sp_value: int, mode) -> int:
+        return _remap_sp_affine_mem_value(value, sp_value, mode)
 
     def sp_affine_cache_items(sp_affine_mem_offsets):
         if not sp_affine_mem_offsets:
@@ -886,15 +944,51 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return tuple(sorted((offset, mode) for offset, mode in sp_affine_mem_offsets.items()))
         return tuple(sorted((offset, 'direct') for offset in sp_affine_mem_offsets))
 
-    def set_concrete_state(state, reg_values, mem_values, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def runtime_reg_value(reg, value, sp_value, reg_runtime_recipes=None):
+        recipe = (reg_runtime_recipes or {}).get(reg)
+        if recipe is not None:
+            return _affine_quotient_value(sp_value, recipe)
+        return remap_sp_relative_value(
+            value,
+            CONCRETE_REPLAY_SP,
+            sp_value,
+            allow_scaled_stack=True,
+        )
+
+    def runtime_dynamic_mem_addr(sp_value, entry):
+        recipe, addr_const, _, _, _ = entry
+        quotient = _affine_quotient_value(sp_value, recipe)
+        return (quotient * int(recipe[2]) + int(addr_const)) & ((1 << 64) - 1)
+
+    def runtime_dynamic_mem_value(sp_value, entry):
+        _, _, _, raw_value, value_recipe = entry
+        if value_recipe is not None:
+            return remap_sp_affine_mem_value(raw_value, sp_value, value_recipe)
+        return remap_sp_relative_value(
+            raw_value,
+            CONCRETE_REPLAY_SP,
+            sp_value,
+        )
+
+    def set_concrete_state(
+        state,
+        reg_values,
+        mem_values,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
+    ):
         for i in range(32):
             setattr(state.regs, f'x{i}', claripy.BVV(0, 64))
         state.regs.sp = concrete_bvv(sp_value)
         state.regs.x0 = claripy.BVV(0, 64)
         for reg, value in reg_values.items():
-            setattr(state.regs, reg.name, concrete_bvv(
-                remap_sp_relative_value(value, CONCRETE_REPLAY_SP, sp_value, allow_scaled_stack=True)
-            ))
+            setattr(
+                state.regs,
+                reg.name,
+                concrete_bvv(runtime_reg_value(reg, value, sp_value, reg_runtime_recipes)),
+            )
         for addr_offset, value in mem_values.items():
             mode = sp_affine_mode(sp_affine_mem_offsets, addr_offset)
             if mode is not None:
@@ -906,16 +1000,34 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 concrete_bvv(stored_value),
                 endness=proj.arch.memory_endness,
             )
+        for entry in dynamic_mem_inits or ():
+            _, _, width, _, _ = entry
+            stored_value = runtime_dynamic_mem_value(sp_value, entry)
+            state.memory.store(
+                runtime_dynamic_mem_addr(sp_value, entry),
+                claripy.BVV(stored_value & ((1 << (width * 8)) - 1), width * 8),
+                endness=proj.arch.memory_endness,
+            )
 
     last_prefix_fail_info = {}
 
-    def replay_concrete_init(reg_values, mem_values, debug=False, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def replay_concrete_init(
+        reg_values,
+        mem_values,
+        debug=False,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
+    ):
         _write_profile_stage(name, "init:concrete_replay")
         prefix_states = replay_prefix_states(
             reg_values,
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         if prefix_states is not None:
             if fail_addr is not None and fail_addr in prefix_states:
@@ -923,7 +1035,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if last_prefix_fail_info:
                         print("prefix_fail", last_prefix_fail_info)
                     print("prefix_reg_values", {
-                        reg.name: hex(remap_sp_relative_value(value, CONCRETE_REPLAY_SP, sp_value))
+                        reg.name: hex(runtime_reg_value(reg, value, sp_value, reg_runtime_recipes))
                         for reg, value in reg_values.items()
                     })
                     prefix_mem_values = {}
@@ -947,7 +1059,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS,
             },
         )
-        set_concrete_state(replay_state, reg_values, mem_values, sp_value=sp_value, sp_affine_mem_offsets=sp_affine_mem_offsets)
+        set_concrete_state(
+            replay_state,
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
+        )
         replay_mgr = proj.factory.simulation_manager(replay_state)
         replay_mgr.explore(find=end_addr)
         if replay_mgr.found:
@@ -955,7 +1075,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         if debug:
             print(f"replay failed for {name}")
             print("sp_value", hex(sp_value))
-            print("reg_values", {reg.name: hex(remap_sp_relative_value(value, CONCRETE_REPLAY_SP, sp_value)) for reg, value in reg_values.items()})
+            print("reg_values", {
+                reg.name: hex(runtime_reg_value(reg, value, sp_value, reg_runtime_recipes))
+                for reg, value in reg_values.items()
+            })
             debug_mem_values = {}
             for offset, value in mem_values.items():
                 mode = sp_affine_mode(sp_affine_mem_offsets, offset)
@@ -973,7 +1096,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS,
                     },
                 )
-                set_concrete_state(fail_state, reg_values, mem_values, sp_value=sp_value, sp_affine_mem_offsets=sp_affine_mem_offsets)
+                set_concrete_state(
+                    fail_state,
+                    reg_values,
+                    mem_values,
+                    sp_value=sp_value,
+                    sp_affine_mem_offsets=sp_affine_mem_offsets,
+                    reg_runtime_recipes=reg_runtime_recipes,
+                    dynamic_mem_inits=dynamic_mem_inits,
+                )
                 fail_mgr = proj.factory.simulation_manager(fail_state)
                 fail_mgr.explore(find=fail_addr)
                 if fail_mgr.found:
@@ -1032,7 +1163,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         def __init__(self, values):
             self.regs = ConcretePrefixRegs(values)
 
-    def concrete_prefix_states(reg_values, mem_values, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def concrete_prefix_states(
+        reg_values,
+        mem_values,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
+    ):
         mask = (1 << 64) - 1
         prefix_prog = prog2se
         debug_concrete_prefix = os.environ.get("RVMCA_DEBUG_CONCRETE_PREFIX") == "1"
@@ -1074,7 +1212,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         for reg, value in reg_values.items():
             if reg not in XREG:
                 return unsupported(-1, reg, 'non_xreg_init')
-            regs[reg.name] = u64(remap_sp_relative_value(value, CONCRETE_REPLAY_SP, sp_value, allow_scaled_stack=True))
+            regs[reg.name] = u64(
+                runtime_reg_value(reg, value, sp_value, reg_runtime_recipes)
+            )
         regs['x0'] = 0
 
         mem_words = {}
@@ -1179,6 +1319,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             field_mask = ((1 << (width * 8)) - 1) << lo
             word = mem_words.get(word_offset, 0)
             mem_words[word_offset] = u64((word & ~field_mask) | ((value << lo) & field_mask))
+
+        for entry in dynamic_mem_inits or ():
+            _, _, width, _, _ = entry
+            store_mem(
+                runtime_dynamic_mem_addr(sp_value, entry),
+                width,
+                runtime_dynamic_mem_value(sp_value, entry),
+            )
 
         def eval_r(inst):
             lhs = reg_value(inst.rs1)
@@ -1462,23 +1610,49 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             states_by_addr[end_addr] = ConcretePrefixState(regs.copy())
         return states_by_addr
 
-    def replay_prefix_cache_key(reg_values, mem_values, sp_value, sp_affine_mem_offsets):
+    def replay_prefix_cache_key(
+        reg_values,
+        mem_values,
+        sp_value,
+        sp_affine_mem_offsets,
+        reg_runtime_recipes,
+        dynamic_mem_inits,
+    ):
         mask = (1 << 64) - 1
         return (
             sp_value & mask,
             tuple(sorted((reg.name, value & mask) for reg, value in reg_values.items())),
             tuple(sorted((offset, value & mask) for offset, value in mem_values.items())),
             sp_affine_cache_items(sp_affine_mem_offsets),
+            tuple(sorted(
+                (reg.name, tuple(recipe))
+                for reg, recipe in (reg_runtime_recipes or {}).items()
+            )),
+            tuple(tuple(entry) for entry in (dynamic_mem_inits or ())),
         )
 
-    def replay_prefix_states(reg_values, mem_values, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def replay_prefix_states(
+        reg_values,
+        mem_values,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
+    ):
         _write_profile_stage(
             name,
             "init:concrete_replay_prefix",
             sp=hex(sp_value),
             **replay_prefix_context,
         )
-        cache_key = replay_prefix_cache_key(reg_values, mem_values, sp_value, sp_affine_mem_offsets)
+        cache_key = replay_prefix_cache_key(
+            reg_values,
+            mem_values,
+            sp_value,
+            sp_affine_mem_offsets,
+            reg_runtime_recipes,
+            dynamic_mem_inits,
+        )
         if cache_key in replay_prefix_state_cache:
             _write_profile_stage(
                 name,
@@ -1493,6 +1667,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         if states_by_addr is not None:
             replay_prefix_state_cache[cache_key] = states_by_addr
@@ -1512,7 +1688,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS,
             },
         )
-        set_concrete_state(replay_state, reg_values, mem_values, sp_value=sp_value, sp_affine_mem_offsets=sp_affine_mem_offsets)
+        set_concrete_state(
+            replay_state,
+            reg_values,
+            mem_values,
+            sp_value=sp_value,
+            sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
+        )
         replay_mgr = proj.factory.simulation_manager(replay_state)
         states_by_addr = {}
         max_steps = max(1, len(prog.insts) + 8)
@@ -1536,12 +1720,22 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         replay_prefix_state_cache[cache_key] = states_by_addr
         return states_by_addr
 
-    def replay_prefix_state(reg_values, mem_values, target_addr, sp_value=CONCRETE_REPLAY_SP, sp_affine_mem_offsets=None):
+    def replay_prefix_state(
+        reg_values,
+        mem_values,
+        target_addr,
+        sp_value=CONCRETE_REPLAY_SP,
+        sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
+    ):
         states_by_addr = replay_prefix_states(
             reg_values,
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         if states_by_addr is None:
             return None
@@ -3486,10 +3680,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         candidate_init = []
         reg_init = []
         reg_values = {}
+        reg_runtime_recipes = {}
+        reg_runtime_accesses = {}
+        pending_reg_runtime_recipes = {}
+        dynamic_mem_inits = []
         mem_values = {}
         mem_offset_addr_symbols = {}
         mem_offset_addr_entries = {}
         mem_slot_symbols = {}
+        load_slot_layouts = {}
         addr_expr_offsets = {}
         expr_key_cache = {}
         expr_vars_cache = {}
@@ -5876,8 +6075,30 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             force_stack_offset=None,
             force_sp_delta=None,
             force_inverse_sp_delta=None,
+            force_scaled_stack=None,
+            force_affine_quotient=None,
             allow_scaled_stack=False,
         ):
+            if force_affine_quotient is not None:
+                _, offset, scale = force_affine_quotient
+                scratch = TEMP_REG2 if reg_name != TEMP_REG2 else TEMP_REG
+                insts.append(UFmtInst('li', reg_name, abs(offset)))
+                if offset >= 0:
+                    insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
+                else:
+                    insts.append(RFmtInst('add', reg_name, 'sp', reg_name))
+                insts.append(UFmtInst('li', scratch, scale))
+                insts.append(RFmtInst('divu', reg_name, reg_name, scratch))
+                return
+            if force_scaled_stack is not None:
+                offset, shift = force_scaled_stack
+                insts.append(UFmtInst('li', reg_name, abs(offset)))
+                if offset >= 0:
+                    insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
+                else:
+                    insts.append(RFmtInst('add', reg_name, 'sp', reg_name))
+                insts.append(IFmtInst('srli', reg_name, reg_name, shift))
+                return
             if force_sp_delta is not None:
                 insts.append(UFmtInst('li', reg_name, force_sp_delta & ((1 << 64) - 1)))
                 insts.append(RFmtInst('add', reg_name, 'sp', reg_name))
@@ -9711,6 +9932,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if lhs is None or rhs is None:
                         return None
                     return lhs[0] - rhs[0], (lhs[1] - rhs[1]) & mask, lhs[2] + rhs[2]
+                if op in {'__mul__', 'Mul'} and len(args) == 2:
+                    for affine_arg, factor_arg in (args, reversed(args)):
+                        if expr_vars(factor_arg):
+                            continue
+                        factor = concrete_expr_value(factor_arg)
+                        if factor is None or factor <= 0 or factor > MAX_AFFINE_QUOTIENT_SCALE:
+                            continue
+                        parsed = parse(affine_arg)
+                        if parsed is None:
+                            continue
+                        scale, const, constraints = parsed
+                        return scale * factor, (const * factor) & mask, constraints
+                    return None
                 if op == '__lshift__' and len(args) == 2:
                     parsed = parse(args[0])
                     shift_arg = args[1]
@@ -9749,15 +9983,42 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if parsed is None:
                 return None
             scale, const, constraints = parsed
-            if scale <= 1 or scale & (scale - 1):
+            if scale <= 1 or scale > MAX_AFFINE_QUOTIENT_SCALE:
                 return None
             return scale, const & mask, constraints
+
+        def fixed_sp_affine_quotient_compatible(addr_symbol, access_offset):
+            if (
+                find_reg_by_name(TEMP_REG) in regs_undefined
+                or find_reg_by_name(TEMP_REG2) in regs_undefined
+            ):
+                return True
+            mask = (1 << 64) - 1
+            for reg in regs_undefined:
+                symbol = reg_to_symbol.get(reg)
+                if symbol is None:
+                    continue
+                scaled = scaled_symbol_affine(addr_symbol, symbol)
+                if scaled is None:
+                    continue
+                scale, const, constraints = scaled
+                if constraints:
+                    continue
+                raw_value = (
+                    CONCRETE_REPLAY_SP - access_offset - const
+                ) & mask
+                if raw_value % scale:
+                    return False
+            return True
 
         def choose_scaled_address_register_value(symbol):
             symbol_vars = expr_vars(symbol)
             if not symbol_vars:
                 return None
+            symbol_key = expr_key(symbol)
+            pending_reg_runtime_recipes.pop(symbol_key, None)
             candidates = []
+            debug_runtime_recipe = os.environ.get("RVMCA_DEBUG_REPAIR") == "1"
 
             def mul_carrier_constraints(mul_node):
                 mul_args = [
@@ -9876,9 +10137,43 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     continue
                                 target_addr = concrete_stack_addr(access_offset)
                                 value = (target_addr - residual_value) & ((1 << 64) - 1)
-                                candidates.append((value, addr_symbol, target_addr, access_offset, group_constraints, group_targets))
+                                candidates.append((
+                                    value,
+                                    addr_symbol,
+                                    target_addr,
+                                    access_offset,
+                                    group_constraints,
+                                    group_targets,
+                                    None,
+                                ))
                     continue
                 scale, const, scaled_constraints = scaled
+                runtime_accesses = []
+                runtime_recipe_eligible = (
+                    not scaled_constraints
+                    and find_reg_by_name(TEMP_REG) not in regs_undefined
+                    and find_reg_by_name(TEMP_REG2) not in regs_undefined
+                )
+                # The expression proof must cover every address affected by
+                # this live-in.  A partial recipe would relocate only some of
+                # the accesses and could silently change aliasing.
+                for other_inst, other_addr_symbol, other_idx, other_width in mem_accesses:
+                    if not (expr_vars(other_addr_symbol) & symbol_vars):
+                        continue
+                    other_scaled = scaled_symbol_affine(other_addr_symbol, symbol)
+                    if other_scaled is None:
+                        runtime_recipe_eligible = False
+                        continue
+                    other_scale, other_const, other_constraints = other_scaled
+                    if other_scale != scale or other_constraints:
+                        runtime_recipe_eligible = False
+                        continue
+                    runtime_accesses.append((
+                        other_idx,
+                        _signed_u64(other_const),
+                        other_width,
+                        other_inst.type == IType.Load,
+                    ))
                 group_requirements = []
                 for _, other_addr_symbol, _, other_width in mem_accesses:
                     if not (expr_vars(other_addr_symbol) & symbol_vars):
@@ -9911,6 +10206,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 )
                 if preferred is not None:
                     starts.insert(0, preferred)
+                known_access_offset = addr_expr_offsets.get(expr_key(addr_symbol))
+                if known_access_offset is not None:
+                    starts.insert(0, known_access_offset)
                 starts.extend(used + max(width, used_width) for used, used_width in used_stack_offsets)
                 group_low = align
                 for _, delta, other_width in group_requirements:
@@ -9940,7 +10238,58 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             (other_addr_symbol, concrete_stack_addr(access_offset + delta))
                             for other_addr_symbol, delta, _ in group_requirements
                         ]
-                        candidates.append((value, addr_symbol, target_addr, access_offset, scaled_constraints, group_targets))
+                        runtime_info = None
+                        direct_scaled_recipe = scaled_stack_transform_for_value(value)
+                        needs_quotient_recipe = (
+                            bool(scale & (scale - 1))
+                            or direct_scaled_recipe is None
+                        )
+                        if (
+                            runtime_recipe_eligible
+                            and needs_quotient_recipe
+                            and runtime_accesses
+                        ):
+                            numerator_offset = access_offset + _signed_u64(const)
+                            remainders = _affine_quotient_remainders(
+                                numerator_offset,
+                                scale,
+                            )
+                            runtime_safe = bool(remainders)
+                            for _, other_const, other_width, _ in runtime_accesses:
+                                base_offset = numerator_offset - other_const
+                                for remainder in remainders:
+                                    actual_offset = base_offset + remainder
+                                    if (
+                                        actual_offset < max(1, other_width)
+                                        or actual_offset > STACK_RANGE
+                                        or (
+                                            other_width > 1
+                                            and actual_offset % other_width
+                                        )
+                                    ):
+                                        runtime_safe = False
+                                        break
+                                if not runtime_safe:
+                                    break
+                            if runtime_safe:
+                                runtime_info = {
+                                    'recipe': (
+                                        'affine_quotient',
+                                        numerator_offset,
+                                        scale,
+                                    ),
+                                    'accesses': tuple(runtime_accesses),
+                                    'remainders': remainders,
+                                }
+                        candidates.append((
+                            value,
+                            addr_symbol,
+                            target_addr,
+                            access_offset,
+                            scaled_constraints,
+                            group_targets,
+                            runtime_info,
+                        ))
 
                 mul_carrier = mul_carrier_affine(addr_symbol)
                 if mul_carrier is None:
@@ -10003,9 +10352,25 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         for other_addr_symbol, delta, _, other_constraints in group_requirements:
                             group_targets.append((other_addr_symbol, concrete_stack_addr(access_offset + delta)))
                             group_constraints.extend(other_constraints)
-                        candidates.append((value, addr_symbol, target_addr, access_offset, group_constraints, group_targets))
+                        candidates.append((
+                            value,
+                            addr_symbol,
+                            target_addr,
+                            access_offset,
+                            group_constraints,
+                            group_targets,
+                            None,
+                        ))
             seen_values = set()
-            for value, addr_symbol, target_addr, access_offset, scaled_constraints, group_targets in candidates:
+            for (
+                value,
+                addr_symbol,
+                target_addr,
+                access_offset,
+                scaled_constraints,
+                group_targets,
+                runtime_info,
+            ) in candidates:
                 if value in seen_values:
                     continue
                 seen_values.add(value)
@@ -10027,7 +10392,169 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     )
                 ):
                     used_stack_offsets.append((access_offset, INIT_ACCESS_SLOT_WIDTH))
+                    if runtime_info is not None:
+                        pending_reg_runtime_recipes[symbol_key] = runtime_info
+                        max_remainder = max(runtime_info['remainders'])
+                        for _, other_const, other_width, _ in runtime_info['accesses']:
+                            base_offset = runtime_info['recipe'][1] - other_const
+                            used_stack_offsets.append((
+                                base_offset + max_remainder,
+                                other_width + max_remainder,
+                            ))
+                    if debug_runtime_recipe:
+                        DEBUG(f"scaled_address_value_selected {({
+                            'symbol': str(symbol),
+                            'value': hex(value),
+                            'access_offset': access_offset,
+                            'runtime_recipe': runtime_info,
+                        })}")
                     return value
+            if debug_runtime_recipe:
+                DEBUG(f"scaled_address_value_unavailable {({
+                    'symbol': str(symbol),
+                    'candidate_count': len(candidates),
+                })}")
+            return None
+
+        def is_power_of_two_scaled_affine(expr, symbol):
+            scaled = scaled_symbol_affine(expr, symbol)
+            if scaled is None:
+                return False
+            scale = scaled[0]
+            return not (scale & (scale - 1))
+
+        def choose_affine_quotient_loaded_address_value(symbol, load_idx):
+            """Choose a runtime-SP quotient for a scaled loaded address value."""
+            symbol_vars = expr_vars(symbol)
+            if not symbol_vars:
+                return None
+
+            related_accesses = []
+            for _, addr_symbol, access_idx, width in mem_accesses:
+                if access_idx <= load_idx or not (expr_vars(addr_symbol) & symbol_vars):
+                    continue
+                scaled = scaled_symbol_affine(addr_symbol, symbol)
+                if scaled is None:
+                    return None
+                scale, const, constraints = scaled
+                if constraints:
+                    return None
+                related_accesses.append((addr_symbol, width, scale, _signed_u64(const)))
+            if not related_accesses:
+                return None
+
+            scales = {scale for _, _, scale, _ in related_accesses}
+            if len(scales) != 1:
+                return None
+            scale = next(iter(scales))
+            if scale <= 1 or scale > MAX_AFFINE_QUOTIENT_SCALE:
+                return None
+            # Existing shift recipes are exact and should retain priority.
+            if not (scale & (scale - 1)):
+                return None
+
+            primary_addr, primary_width, _, primary_const = related_accesses[0]
+            align = primary_width if primary_width > 1 else 1
+            starts = [align, INIT_PTR_MIN_OFFSET]
+            preferred = next_free_stack_offset(
+                used_stack_offsets,
+                align=align,
+                width=INIT_ACCESS_SLOT_WIDTH,
+                start=align,
+            )
+            if preferred is not None:
+                starts.insert(0, preferred)
+            starts.extend(
+                used_offset + max(primary_width, used_width)
+                for used_offset, used_width in used_stack_offsets
+            )
+
+            seen_offsets = set()
+            mask = (1 << 64) - 1
+            for start in starts:
+                start = _align_up(max(1, start), align)
+                for access_offset in range(start, STACK_RANGE + 1, align):
+                    if access_offset in seen_offsets:
+                        continue
+                    seen_offsets.add(access_offset)
+                    numerator_offset = access_offset + primary_const
+                    numerator = (CONCRETE_REPLAY_SP - numerator_offset) & mask
+                    if numerator % scale:
+                        continue
+                    remainders = _affine_quotient_remainders(
+                        numerator_offset,
+                        scale,
+                    )
+                    if not remainders:
+                        continue
+
+                    group_targets = []
+                    group_ranges = []
+                    runtime_safe = True
+                    for addr_symbol, width, _, addr_const in related_accesses:
+                        base_offset = access_offset + primary_const - addr_const
+                        for remainder in remainders:
+                            actual_offset = base_offset + remainder
+                            if (
+                                actual_offset < max(1, width)
+                                or actual_offset > STACK_RANGE
+                                or (width > 1 and actual_offset % width)
+                                or any(
+                                    concrete_ranges_overlap(
+                                        actual_offset,
+                                        width,
+                                        used_offset,
+                                        used_width,
+                                    )
+                                    for used_offset, used_width in used_stack_offsets
+                                )
+                            ):
+                                runtime_safe = False
+                                break
+                        if not runtime_safe:
+                            break
+                        group_targets.append(
+                            (addr_symbol, concrete_stack_addr(base_offset))
+                        )
+                        group_ranges.append((base_offset, width))
+                    if not runtime_safe:
+                        continue
+
+                    value = numerator // scale
+                    constraints = [symbol == expr_bvv(value, symbol)]
+                    constraints.extend(
+                        addr_symbol == target_addr
+                        for addr_symbol, target_addr in group_targets
+                    )
+                    if not (
+                        try_add_constraint_set_fast(constraints, timeout_ms=5000)
+                        or try_add_constraint_set_related(
+                            constraints,
+                            symbol_vars,
+                            timeout_ms=5000,
+                        )
+                    ):
+                        continue
+
+                    max_remainder = max(remainders)
+                    for base_offset, width in group_ranges:
+                        used_stack_offsets.append((
+                            base_offset + max_remainder,
+                            width + max_remainder,
+                        ))
+                    recipe = (
+                        'affine_quotient',
+                        numerator_offset,
+                        scale,
+                    )
+                    if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                        DEBUG(f"loaded_affine_quotient_selected {({
+                            'value': hex(value),
+                            'recipe': recipe,
+                            'remainders': remainders,
+                            'access_count': len(related_accesses),
+                        })}")
+                    return value, recipe
             return None
 
         def choose_scaled_loaded_address_value(symbol):
@@ -13149,6 +13676,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if access_offset <= 0 or access_offset > STACK_RANGE:
                     return False
                 if align and access_offset % align != 0:
+                    return False
+                if not fixed_sp_affine_quotient_compatible(
+                    addr_symbol,
+                    access_offset,
+                ):
                     return False
                 if any(
                     concrete_ranges_overlap(access_offset, width, used, used_width)
@@ -16381,6 +16913,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             residual_like_scalar = r in residual_scalar_regs or r in pointer_nonlinear_scalar_regs
             self_mul_address_residual = has_self_mul_address_residual(r)
             scaled_address_carrier_use = has_scaled_address_carrier_use(symbol)
+            non_power_two_affine_use = any(
+                (
+                    (scaled := scaled_symbol_affine(addr_symbol, symbol))
+                    is not None
+                )
+                and bool(scaled[0] & (scaled[0] - 1))
+                for _, addr_symbol, _, _ in mem_accesses
+                if expr_vars(addr_symbol) & symbol_vars_for_fallback
+            )
             fixed_residual_mul_carrier_use = has_fixed_residual_mul_carrier_use_for_symbol(symbol)
             mul_address_carrier_use = any(
                 (expr_vars(addr_symbol) & symbol_vars_for_fallback)
@@ -16420,6 +16961,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'residual_like_scalar': residual_like_scalar,
                     'fixed_residual_mul_carrier_use': fixed_residual_mul_carrier_use,
                     'mul_address_carrier_use': mul_address_carrier_use,
+                    'self_mul_address_residual': self_mul_address_residual,
+                    'scaled_address_carrier_use': scaled_address_carrier_use,
+                    'non_power_two_affine_use': non_power_two_affine_use,
                     'scalar_hint': r in scalar_hint_regs,
                     'direct_affine_address_base': direct_affine_address_base,
                 })}")
@@ -16574,6 +17118,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     val = 0
             if (
                 val is None
+                and r not in base_like_regs
+                and non_power_two_affine_use
+            ):
+                write_stage(
+                    "init:materialize_init:register",
+                    reg=r.name,
+                    phase="runtime_affine_quotient",
+                )
+                val = choose_scaled_address_register_value(symbol)
+            if (
+                val is None
                 and constrained_by_materialized
                 and r not in base_like_regs
                 and not direct_affine_address_base
@@ -16586,11 +17141,21 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     ):
                             val = model_val & ((1 << 64) - 1)
                             break
+            if os.environ.get("RVMCA_DEBUG_REPAIR") == "1" and scaled_address_carrier_use:
+                DEBUG(f"scaled_address_carrier_state {({
+                    'reg': r.name,
+                    'value': None if val is None else hex(val),
+                })}")
             if (
                 val is None
                 and r not in base_like_regs
                 and (not self_mul_address_residual or scaled_address_carrier_use)
             ):
+                if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                    DEBUG(f"scaled_address_carrier_try {({
+                        'reg': r.name,
+                        'symbol': str(symbol),
+                    })}")
                 write_stage("init:materialize_init:register", reg=r.name, phase="scaled_addr_carrier")
                 val = choose_scaled_address_register_value(symbol)
             if (
@@ -17058,7 +17623,21 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if val is None:
                         raise
             write_stage("init:materialize_init:register", reg=r.name, phase="emit")
-            append_value_init(reg_init, r.name, val, allow_scaled_stack=True)
+            runtime_info = pending_reg_runtime_recipes.get(expr_key(symbol))
+            runtime_recipe = None
+            if runtime_info is not None:
+                candidate_recipe = runtime_info['recipe']
+                if _affine_quotient_value(CONCRETE_REPLAY_SP, candidate_recipe) == val:
+                    runtime_recipe = candidate_recipe
+                    reg_runtime_recipes[r] = candidate_recipe
+                    reg_runtime_accesses[r] = runtime_info['accesses']
+            append_value_init(
+                reg_init,
+                r.name,
+                val,
+                force_affine_quotient=runtime_recipe,
+                allow_scaled_stack=True,
+            )
             reg_values[r] = val & ((1 << 64) - 1)
             scalar_offset += 8
 
@@ -17102,6 +17681,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     )
                 ):
                     reg_values[reg] = new_value
+                    recipe = reg_runtime_recipes.get(reg)
+                    if (
+                        recipe is not None
+                        and _affine_quotient_value(CONCRETE_REPLAY_SP, recipe) != new_value
+                    ):
+                        reg_runtime_recipes.pop(reg, None)
+                        reg_runtime_accesses.pop(reg, None)
                     stack_offset = stack_offset_for_value(new_value)
                     if stack_offset is not None and not any(
                         concrete_ranges_overlap(stack_offset, 8, used_offset, used_width)
@@ -17122,6 +17708,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     rebuilt,
                     reg.name,
                     reg_values[reg] & ((1 << 64) - 1),
+                    force_affine_quotient=reg_runtime_recipes.get(reg),
                     allow_scaled_stack=True,
                 )
             return rebuilt
@@ -18730,6 +19317,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         remember_affine_base_offset(base_key, base, addr + imm)
                         remember_equiv_base_offset(base, addr + imm)
 
+                if not fixed_sp_affine_quotient_compatible(addr_symbol, addr):
+                    debug_load_slot_choice(
+                        "reject_affine_quotient_inexact",
+                        candidate_offset=addr,
+                    )
+                    return False
                 if low_guard_prior_store_conflict(addr):
                     debug_load_slot_choice(
                         "reject_low_guard_prior_store",
@@ -19577,7 +20170,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if value_is_store_address_base:
                 scalar_zero_load = False
             scaled_loaded_value = None
+            loaded_affine_quotient_recipe = None
             value_is_scaled_address_scalar = False
+            value_needs_scaled_sp_recipe = (
+                inst.width == 8
+                and any(
+                    later_idx > inst_idx
+                    and bool(expr_vars(later_addr_symbol) & value_vars)
+                    and is_power_of_two_scaled_affine(
+                        later_addr_symbol,
+                        value_expr,
+                    )
+                    for _, later_addr_symbol, later_idx, _ in mem_accesses
+                )
+            )
             write_stage(
                 "init:materialize_init:load_slots:entry",
                 slot=load_slot_idx,
@@ -19589,7 +20195,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 and not value_is_store_address_base
                 and is_deferred_loaded_address_scalar(inst, value_expr, inst_idx)
             ):
-                scaled_loaded_value = choose_scaled_loaded_address_value(value_expr)
+                affine_quotient_choice = choose_affine_quotient_loaded_address_value(
+                    value_expr,
+                    inst_idx,
+                )
+                if affine_quotient_choice is not None:
+                    (
+                        scaled_loaded_value,
+                        loaded_affine_quotient_recipe,
+                    ) = affine_quotient_choice
+                else:
+                    scaled_loaded_value = choose_scaled_loaded_address_value(value_expr)
                 if scaled_loaded_value is not None:
                     value_is_scaled_address_scalar = True
                     if scaled_loaded_value == 0:
@@ -19711,6 +20327,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
             word_offset = ((addr + 7) // 8) * 8
             byte_offset = word_offset - addr
+            load_slot_layouts[inst_idx] = (
+                word_offset,
+                byte_offset,
+                inst.width,
+            )
             assert 0 <= byte_offset and byte_offset + inst.width <= 8, (
                 f"invalid init slot field: offset={addr}, width={inst.width}, "
                 f"byte_offset={byte_offset}, inst_idx={inst_idx}, addr={addr_symbol}"
@@ -19869,6 +20490,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     slot['feeds_store_addr'] = True
             if field_added and inst.width == 8 and byte_offset == 0 and (inst_idx, str(value_expr)) in sp_affine_source_load_keys:
                 mem_slot_symbols[word_offset]['sp_affine'] = True
+            if field_added and inst.width == 8 and byte_offset == 0 and value_needs_scaled_sp_recipe:
+                mem_slot_symbols[word_offset]['scaled_sp_affine'] = True
+            if (
+                field_added
+                and inst.width == 8
+                and byte_offset == 0
+                and loaded_affine_quotient_recipe is not None
+            ):
+                mem_slot_symbols[word_offset]['affine_quotient'] = (
+                    loaded_affine_quotient_recipe
+                )
             write_stage(
                 "init:materialize_init:load_slots:entry",
                 slot=load_slot_idx,
@@ -20186,6 +20818,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             value_stack_offset = stack_offset_for_value(actual_value)
             force_sp_delta = None
             force_inverse_sp_delta = None
+            force_scaled_stack = None
+            force_affine_quotient = slot.get('affine_quotient')
             actual_signed_value = _signed_u64(actual_value)
             scalar_sp_affine_value = -STACK_RANGE <= actual_signed_value <= STACK_RANGE
             write_stage(
@@ -20195,11 +20829,24 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 pointer_like=bool(slot.get('pointer_like')),
                 sp_affine=bool(slot.get('sp_affine')),
             )
-            combined_sp_affine_mode = (
-                sp_affine_mode_for_compensation_value(actual_value)
-                if value_stack_offset is None and not scalar_sp_affine_value
-                else None
-            )
+            if force_affine_quotient is not None:
+                expected_value = _affine_quotient_value(
+                    CONCRETE_REPLAY_SP,
+                    force_affine_quotient,
+                )
+                assert actual_value == expected_value, (
+                    "affine quotient slot value changed after selection: "
+                    f"actual={actual_value:#x}, expected={expected_value:#x}, "
+                    f"recipe={force_affine_quotient!r}"
+                )
+                sp_affine_mem_offsets[addr] = force_affine_quotient
+                combined_sp_affine_mode = None
+            else:
+                combined_sp_affine_mode = (
+                    sp_affine_mode_for_compensation_value(actual_value)
+                    if value_stack_offset is None and not scalar_sp_affine_value
+                    else None
+                )
             combined_sp_affine_value = combined_sp_affine_mode is not None
             if combined_sp_affine_mode == 'direct' and not slot.get('sp_affine'):
                 combined_sp_affine_value = False
@@ -20216,6 +20863,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     force_inverse_sp_delta = (actual_value + CONCRETE_REPLAY_SP) & ((1 << 64) - 1)
                 else:
                     force_sp_delta = (actual_value - CONCRETE_REPLAY_SP) & ((1 << 64) - 1)
+            if slot.get('scaled_sp_affine'):
+                force_scaled_stack = scaled_stack_transform_for_value(
+                    actual_value,
+                    max_offset=MAX_SP_REL_OFFSET,
+                )
+                if force_scaled_stack is not None:
+                    sp_affine_mem_offsets[addr] = (
+                        'scaled',
+                        force_scaled_stack[0],
+                        force_scaled_stack[1],
+                    )
 
             # prepare value
             append_value_init(
@@ -20225,6 +20883,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 force_stack_offset=value_stack_offset,
                 force_sp_delta=force_sp_delta,
                 force_inverse_sp_delta=force_inverse_sp_delta,
+                force_scaled_stack=force_scaled_stack,
+                force_affine_quotient=force_affine_quotient,
             )
             # prepare address
             candidate_init.append(UFmtInst('li', TEMP_REG2, addr))
@@ -20238,9 +20898,113 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 _write_profile_stage(name, "init:materialize_init:deferred_registers")
                 materialize_register(r)
 
+        seen_dynamic_mem_inits = set()
+        store_name_for_width = {
+            1: 'sb',
+            2: 'sh',
+            4: 'sw',
+            8: 'sd',
+        }
+        for reg, recipe in reg_runtime_recipes.items():
+            for inst_idx, addr_const, width, is_load in reg_runtime_accesses.get(reg, ()):
+                if not is_load or width not in store_name_for_width:
+                    continue
+                layout = load_slot_layouts.get(inst_idx)
+                if layout is None:
+                    raw_value = 0
+                else:
+                    word_offset, byte_offset, layout_width = layout
+                    if layout_width != width:
+                        continue
+                    word_value = mem_values.get(word_offset, 0)
+                    raw_value = (
+                        word_value >> (byte_offset * 8)
+                    ) & ((1 << (width * 8)) - 1)
+                value_recipe = (
+                    sp_affine_mode(sp_affine_mem_offsets, layout[0])
+                    if layout is not None
+                    else None
+                )
+                entry = (
+                    recipe,
+                    addr_const,
+                    width,
+                    raw_value,
+                    value_recipe,
+                )
+                if entry in seen_dynamic_mem_inits:
+                    continue
+                seen_dynamic_mem_inits.add(entry)
+                dynamic_mem_inits.append(entry)
+
+                append_value_init(
+                    candidate_init,
+                    TEMP_REG,
+                    0,
+                    force_affine_quotient=recipe,
+                )
+                candidate_init.append(
+                    RFmtInst('mul', TEMP_REG, TEMP_REG, TEMP_REG2)
+                )
+                if addr_const:
+                    candidate_init.append(
+                        UFmtInst('li', TEMP_REG2, abs(addr_const))
+                    )
+                    candidate_init.append(RFmtInst(
+                        'add' if addr_const > 0 else 'sub',
+                        TEMP_REG,
+                        TEMP_REG,
+                        TEMP_REG2,
+                    ))
+                value_stack_offset = stack_offset_for_value(raw_value)
+                value_force_sp_delta = None
+                value_force_inverse_sp_delta = None
+                value_force_scaled_stack = None
+                if value_recipe == 'direct':
+                    value_force_sp_delta = (
+                        raw_value - CONCRETE_REPLAY_SP
+                    ) & ((1 << 64) - 1)
+                elif value_recipe == 'inverse':
+                    value_force_inverse_sp_delta = (
+                        raw_value + CONCRETE_REPLAY_SP
+                    ) & ((1 << 64) - 1)
+                elif (
+                    isinstance(value_recipe, (tuple, list))
+                    and len(value_recipe) == 3
+                    and value_recipe[0] == 'scaled'
+                ):
+                    value_force_scaled_stack = (
+                        int(value_recipe[1]),
+                        int(value_recipe[2]),
+                    )
+                append_value_init(
+                    candidate_init,
+                    TEMP_REG2,
+                    raw_value,
+                    force_stack_offset=value_stack_offset,
+                    force_sp_delta=value_force_sp_delta,
+                    force_inverse_sp_delta=value_force_inverse_sp_delta,
+                    force_scaled_stack=value_force_scaled_stack,
+                )
+                candidate_init.append(StoreInst(
+                    store_name_for_width[width],
+                    TEMP_REG2,
+                    TEMP_REG,
+                    0,
+                ))
+
         reg_init = rebuild_register_init()
         candidate_init.extend(reg_init)
-        return candidate_init, reg_values, mem_values, mem_offset_addr_symbols, candidate_solver, sp_affine_mem_offsets
+        return (
+            candidate_init,
+            reg_values,
+            mem_values,
+            mem_offset_addr_symbols,
+            candidate_solver,
+            sp_affine_mem_offsets,
+            reg_runtime_recipes,
+            dynamic_mem_inits,
+        )
 
     def find_alias_constraints(
         reg_values,
@@ -20249,6 +21013,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         constraint_solver,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
     ):
         alias_same_address_cache = {}
 
@@ -20284,6 +21050,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
 
         concrete_access_cache = {}
@@ -20344,6 +21112,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         constraint_solver,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
     ):
         constraints = []
         seen_loads = set()
@@ -20352,6 +21122,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads + address_source_loads:
             if (load_idx, stable_expr_key(rd_symbol)) in scalar_load_hint_keys:
@@ -20439,6 +21211,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         constraint_solver,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
     ):
         constraints = []
         prefix_states = replay_prefix_states(
@@ -20446,6 +21220,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads:
             pointer_vars = getattr(rd_symbol, 'variables', set())
@@ -20496,6 +21272,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         constraint_solver,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
     ):
         constraints = []
         prefix_states = replay_prefix_states(
@@ -20503,6 +21281,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         for inst, addr_symbol, inst_idx, width in mem_accesses:
             access_addr = original_access_addr(inst_idx)
@@ -20657,6 +21437,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         mem_values,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
+        reg_runtime_recipes=None,
+        dynamic_mem_inits=None,
     ):
         constraints = []
         scalar_loads = []
@@ -20692,6 +21474,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=sp_value,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
 
         def concrete_addr_from_materialized(addr_symbol):
@@ -20909,6 +21693,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 mem_offset_addr_symbols,
                 candidate_solver,
                 sp_affine_mem_offsets,
+                reg_runtime_recipes,
+                dynamic_mem_inits,
             ) = materialize_init(current_solver, retry)
         except AssertionError as exc:
             message = str(exc)
@@ -20955,6 +21741,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 debug=verbose,
                 sp_value=replay_sp,
                 sp_affine_mem_offsets=sp_affine_mem_offsets,
+                reg_runtime_recipes=reg_runtime_recipes,
+                dynamic_mem_inits=dynamic_mem_inits,
             ) is None:
                 failed_replay_sp = replay_sp
                 break
@@ -20970,6 +21758,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 mem_values,
                 sp_value=CONCRETE_REPLAY_SP,
                 sp_affine_mem_offsets=sp_affine_mem_offsets,
+                reg_runtime_recipes=reg_runtime_recipes,
+                dynamic_mem_inits=dynamic_mem_inits,
             )
             if os.environ.get("RVMCA_DEBUG_REPAIR") == "1" and pp_alias_constraints:
                 DEBUG(f"pp_alias_repair_constraints {({
@@ -21003,6 +21793,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             current_solver,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         )
         _write_profile_stage(name, f"init:solve_retry_{retry}:derive_replay_constraints:store_pointer")
         alias_constraints.extend(find_store_pointer_constraints(
@@ -21011,6 +21803,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             current_solver,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         ))
         _write_profile_stage(name, f"init:solve_retry_{retry}:derive_replay_constraints:pointer_slot_store")
         alias_constraints.extend(find_pointer_slot_store_constraints(
@@ -21019,6 +21813,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             current_solver,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         ))
         _write_profile_stage(name, f"init:solve_retry_{retry}:derive_replay_constraints:replay_access")
         alias_constraints.extend(find_replay_access_constraints(
@@ -21027,6 +21823,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             current_solver,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         ))
         _write_profile_stage(name, f"init:solve_retry_{retry}:derive_replay_constraints:narrow_pointer_alias")
         alias_constraints.extend(find_narrow_pointer_alias_constraints(
@@ -21034,6 +21832,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             mem_values,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
+            reg_runtime_recipes=reg_runtime_recipes,
+            dynamic_mem_inits=dynamic_mem_inits,
         ))
         if os.environ.get("RVMCA_DEBUG_REPAIR") == "1" and alias_constraints:
             DEBUG(f"replay_repair_constraints {({

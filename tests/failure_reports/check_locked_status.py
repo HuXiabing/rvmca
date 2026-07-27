@@ -45,8 +45,27 @@ def check_locked_status(
     required_pass: Iterable[str],
     allowed_pass_or_skip: Iterable[str] = (),
     require_exact: bool = False,
+    supplemental_reports: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    outcomes = report_outcomes(report)
+    primary_outcomes = report_outcomes(report)
+    supplemental_outcomes = [
+        report_outcomes(supplemental_report)
+        for supplemental_report in supplemental_reports
+    ]
+    supplemental_passes = {
+        block_id
+        for outcomes in supplemental_outcomes
+        for block_id, status in outcomes.items()
+        if status == "passed"
+    }
+    outcomes = dict(primary_outcomes)
+    supplemented = sorted(
+        block_id
+        for block_id in supplemental_passes
+        if primary_outcomes.get(block_id) != "passed"
+    )
+    for block_id in supplemented:
+        outcomes[block_id] = "passed"
     required_pass = set(required_pass)
     allowed_pass_or_skip = set(allowed_pass_or_skip)
     overlap = sorted(required_pass & allowed_pass_or_skip)
@@ -66,7 +85,10 @@ def check_locked_status(
         if outcomes.get(block_id) == "failed"
     )
     expected = required_pass | allowed_pass_or_skip
-    unexpected = sorted(outcomes.keys() - expected) if require_exact else []
+    observed = set(primary_outcomes)
+    for supplemental in supplemental_outcomes:
+        observed.update(supplemental)
+    unexpected = sorted(observed - expected) if require_exact else []
 
     passed = not any(
         (missing_required, regressed_pass, missing_allowed, failed_allowed, unexpected)
@@ -74,8 +96,12 @@ def check_locked_status(
     return {
         "passed": passed,
         "report_outcomes": len(outcomes),
+        "primary_report_outcomes": len(primary_outcomes),
+        "supplemental_report_count": len(supplemental_outcomes),
         "required_pass": len(required_pass),
         "allowed_pass_or_skip": len(allowed_pass_or_skip),
+        "supplemented_pass": sorted(required_pass & set(supplemented)),
+        "supplemented_allowed": sorted(allowed_pass_or_skip & set(supplemented)),
         "missing_required": missing_required,
         "regressed_pass": regressed_pass,
         "missing_allowed": missing_allowed,
@@ -89,6 +115,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("report", type=Path)
     parser.add_argument("--required-pass", type=Path, required=True)
     parser.add_argument("--allowed-pass-or-skip", type=Path)
+    parser.add_argument(
+        "--supplement",
+        action="append",
+        type=Path,
+        default=[],
+        help="higher-budget report whose explicit PASS outcomes supplement the main report",
+    )
     parser.add_argument("--require-exact", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
@@ -103,11 +136,16 @@ def main() -> int:
         if args.allowed_pass_or_skip is not None
         else []
     )
+    supplemental_reports = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in args.supplement
+    ]
     result = check_locked_status(
         report,
         required_pass,
         allowed,
         require_exact=args.require_exact,
+        supplemental_reports=supplemental_reports,
     )
     if args.json or not result["passed"]:
         print(json.dumps(result, ensure_ascii=False, indent=2))

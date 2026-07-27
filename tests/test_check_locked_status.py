@@ -53,6 +53,46 @@ def test_locked_status_rejects_missing_and_unexpected_ids():
     assert result["unexpected"] == ["extra"]
 
 
+def test_locked_status_accepts_explicit_pass_supplement():
+    result = check_locked_status(
+        make_report(passed=("p1",), failed=("p2",)),
+        required_pass=("p1", "p2"),
+        require_exact=True,
+        supplemental_reports=[make_report(passed=("p2",))],
+    )
+
+    assert result["passed"] is True
+    assert result["supplemented_pass"] == ["p2"]
+    assert result["regressed_pass"] == []
+
+
+@pytest.mark.parametrize("supplement_status", ["failed", "skipped"])
+def test_locked_status_rejects_nonpass_supplement(supplement_status):
+    supplement = make_report(**{supplement_status: ("p2",)})
+    result = check_locked_status(
+        make_report(passed=("p1",), failed=("p2",)),
+        required_pass=("p1", "p2"),
+        require_exact=True,
+        supplemental_reports=[supplement],
+    )
+
+    assert result["passed"] is False
+    assert result["supplemented_pass"] == []
+    assert result["regressed_pass"] == ["p2"]
+
+
+def test_locked_status_rejects_unexpected_supplement_id():
+    result = check_locked_status(
+        make_report(passed=("p1",)),
+        required_pass=("p1",),
+        require_exact=True,
+        supplemental_reports=[make_report(passed=("extra",))],
+    )
+
+    assert result["passed"] is False
+    assert result["unexpected"] == ["extra"]
+
+
 def test_report_outcomes_rejects_duplicate_statuses():
     with pytest.raises(ValueError, match="duplicate report outcome"):
         report_outcomes(make_report(passed=("p1",), failed=("p1",)))
