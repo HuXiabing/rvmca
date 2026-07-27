@@ -2,9 +2,9 @@
 
 ## 1. 背景与基线
 
-本规划以当前 Git 版本为基线：
+本规划的数据重建以冻结的原始生成版本为基线：
 
-- 当前 HEAD：`aaabdf6 Add resumable SPEC06 profiling generator`
+- 冻结基线 HEAD：`aaabdf6 Add resumable SPEC06 profiling generator`
 - `prof.py` 最近功能提交：`fe8b0ab Fix valid initial state generation`
 - SPEC06 输入：`/home/huxiabing/Documents/raw_data/spec06/`
 - 当前输出：`/home/huxiabing/Documents/raw_data/spec06_pp/`
@@ -12,6 +12,10 @@
 - 基本块总数：459580
 - 单块 timeout：300 秒
 - 并发数：2
+
+修复开发在后续提交上单独进行；截至 2026-07-27，候选修复基于
+`f4dc703 Add runtime SP affine quotient recipes`。冻结基线只负责恢复原始非通过块的逐 ID
+状态，不能与候选修复报告混用。
 
 当前结果：
 
@@ -22,7 +26,9 @@
 | failed | 2375 | 0.52% |
 | timeout | 62 | 0.01% |
 
-本轮直接处理 2375 个 failed 和 62 个 timeout，目标是先判断它们是否存在合法 initial，再对可解失败按结构范式迭代修复。
+本轮直接处理 2375 个 failed 和 62 个 timeout。首要优化目标是在历史 2021 个 PASS
+零回退的前提下，让 2375 个原 failed 中尽可能多的基本块得到合法 initial 并真实转为
+PASS；其次处理 62 个 timeout。failed 转成 SKIP 不计入修复收益。
 
 历史回归基线为 `tests/analysis_results.json` 中的 2079 个基本块：
 
@@ -53,13 +59,24 @@
 
 ### 3.1 最终目标
 
-1. 所有当前 failed/timeout 块都完成合法 initial 可行性判定。
-2. 存在合法 initial 的块必须修到 PASS，不能用 SKIP 掩盖生成器缺陷。
-3. 只有能给出明确无解或方法能力边界证明的块才能标记为 SKIP。
-4. timeout 必须先定位阶段并优化；timeout 本身不是无解证明。
-5. 最终 SPEC06 结果中 failed=0、timeout=0；剩余非通过块只能是有逐块理由的 skip。
-6. 历史 2021 个 PASS 全部继续 PASS。
-7. 已通过的 436194 个 SPEC06 块在最终全量验证中不得回退。
+目标按以下顺序排序，低优先级目标不得牺牲高优先级目标：
+
+1. 历史 2021 个 PASS 全部继续 PASS；任一回退立即否决候选修改。
+2. 最大化 2375 个原 failed 中真实转为 PASS 的数量，以逐 ID 的 `failed -> PASS`
+   数量作为主收益指标。
+3. 所有当前 failed/timeout 块都完成合法 initial 可行性判定。
+4. 存在合法 initial 的块持续修到 PASS，不能用 SKIP 掩盖生成器缺陷。
+5. 只有能给出明确无解或方法能力边界证明的块才能标记为 SKIP；`failed -> SKIP`
+   单独统计，不计入新增 PASS。
+6. timeout 必须先定位阶段并优化；timeout 本身不是无解证明。
+7. `failed=0、timeout=0` 是进取目标，而不是通过扩大 SKIP 数量达成的统计目标。
+8. 已通过的 436194 个 SPEC06 块在最终全量验证中不得回退。
+
+每轮报告至少列出以下状态迁移，不能只报告新的聚合状态数量：
+
+- 2375 原 failed：转 PASS、仍 failed、转 timeout、经证明转 SKIP 的数量和 ID。
+- 62 原 timeout：转 PASS、仍 timeout、转 failed、经证明转 SKIP 的数量和 ID。
+- 2021 历史 PASS：保持 PASS 和回退数量；回退必须为 0。
 
 ### 3.2 禁止事项
 
@@ -69,6 +86,7 @@
 - 禁止覆盖当前 `/home/huxiabing/Documents/raw_data/spec06_pp/` 基线结果。
 - 禁止只验证修复样例而不运行 2079 回归门。
 - 禁止提高并发后把资源争用造成的假 timeout 当真实失败。
+- 禁止把 `failed -> SKIP` 算作 PASS 改进，或用增加 SKIP 数量美化修复率。
 
 ## 4. 合法 initial 的判定标准
 
@@ -422,7 +440,7 @@ PYTHONPATH=src python tests/test_all_failures.py \
 
 ### M3：范式迭代修复
 
-- 每个已修范式在目标集合上无 failed/timeout。
+- 在零历史回归前提下，最大化每个范式的 `failed -> PASS` 数量，并记录未解决块。
 - 每次提交通过 2079 硬回归门。
 - SPEC06 locked-pass 集合单调增长。
 
@@ -443,10 +461,12 @@ PYTHONPATH=src python tests/generate_spec06_pp.py \
   --jobs 2 --timeout 300 --progress-every 100
 ```
 
-最终验收标准：
+最终验收标准与报告口径：
 
 - files=31，total=459580。
-- failed=0，timeout=0。
+- 历史 2021 个 PASS 保持 2021/2021 PASS，这是硬门槛。
+- 以 2375 个原 failed 中转为 PASS 的数量作为主要成果；逐 ID 报告所有状态迁移。
+- 尽可能将 failed、timeout 降到 0，但不得通过无证明 SKIP 或回归已有 PASS 达成。
 - 所有剩余 skipped 都有 `skip_proven` sidecar。
 - 当前 436194 个 SPEC06 PASS 全部仍为 PASS。
 - 历史 2021 个 PASS 全部仍为 PASS。

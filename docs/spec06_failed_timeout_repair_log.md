@@ -81,3 +81,390 @@ The run returned success and printed `cycles: 12`.
 Conclusion: `fixable`, with a concrete legal initial witness. The generator
 must preserve a runtime-SP recipe for scaled loaded address terms instead of
 storing their fixed-model value as an absolute constant.
+
+## Pattern: Affine Live-in Scale Plus Fixed Residual
+
+### `403.gcc_15826`
+
+Status before repair: `replay_range_failure`.
+
+The transformed access address is `40 * x15 - 271`. A fixed model value for
+`x15` cannot survive a runtime stack relocation. The following initial uses
+the runtime SP to choose the quotient, then reconstructs and initializes the
+exact byte address used by the block:
+
+```asm
+li x31, 1024
+sub x31, sp, x31
+li x27, 271
+add x31, x31, x27
+li x27, 40
+divu x15, x31, x27
+mul x31, x15, x27
+addi x31, x31, -271
+sb x0, 0(x31)
+```
+
+The quotient remainder places the final access between `sp - 1024` and
+`sp - 1063`. The witness assembled successfully, completed the real QEMU pp
+run, and printed `cycles: 1`.
+
+Conclusion: `fixable`. This is a distinct affine live-in pattern and is not
+covered by the loaded-value power-of-two recipe.
+
+## Pattern: Affine Loaded Value Scale Plus Fixed Residual
+
+### `403.gcc_53786` and `403.gcc_56309`
+
+Status before repair: `replay_range_failure`.
+
+Both blocks load a 64-bit value from an SP-relative initial-memory slot and
+later use that value in an address of the normalized form:
+
+```text
+104 * loaded_value - 128
+```
+
+The old generator solved a concrete value at `CONCRETE_REPLAY_SP` and stored
+that absolute value in the initial-memory slot. At alternate replay SP values,
+the later access therefore remained near the original SP and failed the range
+guard.
+
+A legal runtime initial is:
+
+```text
+loaded_value = (runtime_sp - numerator_offset) // 104
+```
+
+For example, `numerator_offset = -112` makes the later address fall between
+`runtime_sp - 16` and `runtime_sp - 112` for every 16-byte-aligned runtime SP.
+All possible division remainders are multiples of eight, so the 8-byte accesses
+remain aligned. The initial code can materialize the quotient with `divu` and
+store it in the original SP-relative source slot before entering the block.
+
+The production repair accepts this recipe only when every later address
+affected by the loaded value has the same positive affine scale, has no
+unresolved residual constraints, and remains in range and aligned for every
+possible runtime-SP remainder. The selected quotient is shared by initial-code
+emission and concrete replay.
+
+Validation:
+
+```text
+403.gcc_53786  PASS
+403.gcc_56309  PASS
+403.gcc_56742  PASS
+```
+
+The third block has the same loaded affine shape with scale 40 rather than 104.
+All three generated programs completed the real QEMU pp command and returned
+cycle measurements. Conclusion: `fixable`, with legal generated initial
+witnesses; these blocks must not be classified as SKIP.
+
+The post-repair 71-block replay-range sweep reported 4 PASS, 66 FAIL, and one
+60-second timeout. Three PASS records contained the new quotient recipe and are
+the blocks listed above. `403.gcc_53282` also passed twice but its generated
+initial did not contain `divu`; it is retained as an incidental solver outcome
+and is not attributed to this pattern repair.
+
+## Candidate-Selection Nondeterminism: `403.gcc_59659`
+
+The 71-block sweep reported `403.gcc_59659` as `replay_failed`, with the final
+load address tied to the fixed concrete replay SP. An immediate isolated rerun
+of the same worktree generated a runtime-SP-relative index instead:
+
+```text
+li s1, 0xbdc
+sub s1, sp, s1
+srli s1, s1, 2
+```
+
+That initial assembled, passed concrete replay, and completed the real QEMU pp
+command. The first run returned `cycles: 4`; a persisted confirmation rerun
+returned `cycles: 2`. Its full generated program is recorded in
+`tests/failure_reports/spec06_candidate_nondeterministic_1_recheck/`.
+
+Conclusion: `pass_witness`, with a legal initial. The block must not be marked
+SKIP. The differing outcomes with identical source and production code identify
+candidate-selection nondeterminism; later repair work must make the safe
+runtime recipe deterministic without weakening replay checks.
+
+## Pattern: Shared Live-in With Mixed Affine Scales
+
+### `403.gcc_23083`
+
+Status before repair: `replay_range_failure`.
+
+The shared live-in `x8` contributes to two addresses with different scales:
+
+```text
+load_address  = x9 + x8
+store_address = x19 + 8 * x8
+```
+
+A legal initial sets `x8 = 0`, places `x9` at `sp - 16`, and places `x19` at
+`sp - 1024`. A direct witness also initializes the source byte at `sp - 16`.
+The witness assembled and completed the real QEMU pp command with a cycle
+result (`cycles: 6`). Therefore this block is `fixable`, not SKIP. The same structural shape
+occurs in `403.gcc_51922` and `403.gcc_51924`.
+
+The companion variants were checked independently rather than inferred from
+the first witness. For `403.gcc_51922`, a legal initial sets the shared `s5`
+to zero, the additional scaled companion `s11` to zero, the load base `s1` to
+`sp - 16`, and the store base `s2` to `sp - 1024`; QEMU returned `cycles: 9`.
+For `403.gcc_51924`, setting the shared `s10` and scaled companion `s3` to zero
+with the same safe load/store bases returned `cycles: 1`. Both are `fixable`,
+not SKIP.
+
+Production debug output shows the ordering defect. `x9` is materialized first
+as a fixed-SP scalar. The subsequent early-zero attempt for the shared `x8`
+then fails, and the scaled-address fallback commits:
+
+```text
+x8 = 0xfffdfffffff
+```
+
+When `x19` is materialized later, the solver repeatedly tests the valid
+`x8 == 0` relation but rejects it because the incompatible `x8` value has
+already been committed. The resulting load address remains near the old SP at
+alternate replay SP values. The repair must order the shared residual before
+its independent affine bases; it must not weaken replay checks or special-case
+these block IDs.
+
+`tests/test_prof_shared_affine_witness.py` now contains a production-generator
+regression test using only this structural instruction pattern. Before the
+repair it deterministically reaches the same alternate-SP
+`ConcreteReplayFailure` as the SPEC06 block. The test is intentionally red
+until the ordering repair is applied.
+
+Direct `pytest` initially imported the adjacent legacy checkout at
+`/home/huxiabing/Documents/rvmca/src`, which could produce irrelevant results.
+`tests/conftest.py` now puts this checkout's `src` first, and
+`tests/test_import_path.py` locks that invariant. The long-running regression
+harnesses already applied the same path precedence independently.
+
+## Timeout Pattern: Simple Paired Stores Before Pointer Load
+
+### `416.gamess_1454` and `416.gamess_1506`
+
+Both short blocks exhausted the 300-second baseline budget in
+`init:materialize_init:register`, despite having straightforward legal initial
+states. Each block increments a scalar, uses it as the common offset for two
+byte stores, then loads a pointer from `144(sp)` and reads a word at offset 28.
+
+The witnesses set the scalar to zero, place the two store bases so their final
+addresses are `sp - 16` and `sp - 32`, and store `sp - 64` in the pointer slot
+at `144(sp)`. The final word address is therefore `sp - 36`. Both witnesses
+assembled and ran through the real QEMU pp command:
+
+```text
+416.gamess_1454  cycles: 6
+416.gamess_1506  cycles: 2
+```
+
+Conclusion: both are `fixable`, not SKIP. Their baseline timeout is a solver
+search problem, not evidence that no legal initial exists. The witness test is
+`tests/test_prof_timeout_witness.py`.
+
+An isolated production rerun of both blocks with a 60-second budget timed out
+again at the same stage as M0: `416.gamess_1454` while choosing `x18` and
+`416.gamess_1506` while choosing `x19`, both in the `stack_relative` phase.
+The persistent report is
+`tests/failure_reports/spec06_timeout_simple_store_pair_2_current/`. This makes
+the pattern a stable search-complexity defect rather than a transient QEMU or
+resource-contention timeout.
+
+## Legacy Regression Gate: `416.gamess_2304`
+
+The first 2,079-block gate for the scaled loaded-value repair timed out on
+`416.gamess_2304` at the standard 300-second per-block limit. The timeout was
+in `init:materialize_init:register` while materializing `x16`, before the new
+load-slot and memory-value behavior introduced by this repair can run.
+
+An isolated rerun of the same patched code with a 600-second limit completed
+successfully in 352.09 seconds. Historical reports for the same block range
+from a few seconds to roughly 262 seconds, so this is classified as a
+budget-sensitive solver runtime, not a functional regression. The locked
+PASS requirement remains in force; this block must pass an isolated
+low-interference rerun whenever it exceeds the batch timeout.
+
+The loaded-quotient worktree was independently rechecked under the same rule.
+With `jobs=1` and a 600-second limit, `416.gamess_2304` completed as PASS in
+433.9 seconds. The report is
+`tests/failure_reports/legacy_after_affine_loaded_quotient_budget_sensitive_1.json`.
+This provides same-`prof.py` evidence for reconciling the 300-second batch
+timeout; it does not relax the locked PASS policy.
+
+## Repair: Shared Live-in Mixed Affine Scales
+
+The production repair now detects a live-in that appears with coefficient one
+in one address and with a larger affine coefficient in another address, while
+the two addresses have independent direct base companions. The complete set of
+primary and scaled-support residuals is constrained to zero before any base is
+materialized. The repair is enabled only when the full candidate solver proves
+the joint zero constraints SAT; an UNSAT or timeout result leaves the original
+ordering unchanged.
+
+Validation with the repaired production generator:
+
+```text
+403.gcc_23083  PASS
+403.gcc_51922  PASS
+403.gcc_51924  PASS
+```
+
+All three generated initials passed concrete replay and the real QEMU pp run.
+The persistent report is
+`tests/failure_reports/spec06_after_shared_componentwise_shared_3/status.json`.
+
+## Repair: Disconnected Nonlinear Constraints Blocking Direct Load Bases
+
+### `465.tonto_21117` and `465.tonto_21340`
+
+Both historical regression blocks use one live-in as the base of three direct
+loads at fixed offsets 8, 16, and 24. A later load address is governed by a
+separate nonlinear equality over the loaded values and other live-ins. The
+candidate solver had ten constraints: the direct-base component contained only
+the live-in sign guard and `sp = base + offset`, while the nonlinear equality
+connected seven other variables. Every base-offset attempt re-solved the full
+nonlinear formula with a 100 ms budget and was rejected on timeout, eventually
+exhausting both 300-second and 600-second block budgets.
+
+The repair partitions all candidate constraints by their non-SP variables and
+solves every connected component at the same fixed replay SP. Because SP is
+fixed and no other variable is shared across components, all component results
+being SAT is an exact proof that the full conjunction is SAT. The result is
+cached by the complete component constraint set. A direct-load base uses this
+path only when:
+
+- every address involving the base is a load;
+- every such address has a covered fixed residual and stack range;
+- no residual constraint is omitted; and
+- the expensive nonlinear constraint is disconnected from the base.
+
+No solver-unknown result is accepted, and concrete replay/QEMU validation is
+unchanged. Final validation reported:
+
+```text
+465.tonto_21117  PASS  14.0s
+465.tonto_21340  PASS  13.3s
+```
+
+The persistent report is
+`tests/failure_reports/legacy_after_shared_componentwise_tonto_2.json`.
+
+## Loaded-Quotient Regression Gate
+
+The frozen pre-repair gate used profiler SHA-256
+`098515812bfa6418ffa06625f65c4f4a9ae9c813906b73fd05f649358d598b59`
+and completed all 2,079 historical blocks:
+
+```text
+PASS     2016
+SKIP       58
+TIMEOUT     4
+REPLAY      1
+```
+
+Explicit same-profiler PASS supplements reconcile `416.gamess_2304`,
+`456.hmmer_402`, and `464.h264ref_7226`. The only remaining locked regressions
+were the two Tonto blocks above; both now pass with the production repair.
+
+## Baseline Integrity Correction
+
+The first long M0 reconstruction started at 10:26, but the main `prof.py` was
+modified until 13:21. Since each case starts a fresh worker, its 17,406 records
+mixed multiple profiler versions and cannot be a formal baseline. That run was
+stopped without deleting its partial report and moved to:
+
+```text
+tests/failure_reports/spec06_mixed_prof_exploratory_20260727/
+```
+
+The formal M0 reconstruction now runs from an isolated worktree with:
+
+```text
+harness commit:  c660362ef0ed82fc371577a7ce89853eee1c528f
+harness sha256:  153a69dab148d54568d4d82e81047b0f7b0e50195299345036d22b5a8b29461d
+profiler commit: aaabdf6
+profiler sha256: c79ad79b83d0fd64024505cd2e8aa2a02c23aa699a97feb9fae01c80b1bef68d
+```
+
+Its persistent output is
+`tests/failure_reports/spec06_aaabdf6_frozen_baseline/`. Main-worktree changes
+cannot affect that run.
+
+## Repair: Runtime-SP Affine Recipe Priority
+
+Scaled-address synthesis can produce an affine runtime recipe such as
+`(sp - constant) / scale` while the candidate model also contains a concrete
+value tied to the replay SP. The generator previously preferred that concrete
+model value. It could therefore discard a valid runtime-SP-relative recipe and
+emit an initial that passed at the original SP but failed alternate-SP replay.
+
+The repair gives a proven scaled-address runtime recipe priority over the fixed
+candidate-model value. Candidate SAT checks, alternate-SP concrete replay, and
+the real QEMU pp validation are unchanged. The historical reproducer now emits
+the affine recipe and passes:
+
+```text
+445.gobmk_3342   PASS  14.0s
+465.tonto_21117  PASS  13.8s
+465.tonto_21340  PASS  16.0s
+```
+
+The first block locks the recipe-priority regression. The two Tonto blocks also
+confirm that the component-wise exact SAT repair continues to pass after the
+priority change.
+
+## Final Historical Gate for This Repair Batch
+
+The exact production profiler used for the final gate has SHA-256:
+
+```text
+ae4eb4556b93d961b2d10a3d134b38bb5ab81b357fe0bf57212e6fac84d544e0
+```
+
+The complete 2,079-block run at two workers and a 300-second per-block budget
+reported:
+
+```text
+PASS       2019
+SKIP         58
+TIMEOUT       2
+```
+
+The report is
+`tests/failure_reports/legacy_after_runtime_priority_full.json`. The two
+timeouts were solver-budget-sensitive historical PASS blocks, not accepted as
+successful batch outcomes. Each was rerun with the same profiler, one worker,
+and a 600-second budget:
+
+```text
+416.gamess_2304  PASS  370.7s
+456.hmmer_402    PASS  400.5s
+```
+
+The supplement reports are
+`tests/failure_reports/legacy_gamess_budget_supplement_after_runtime_priority.json`
+and
+`tests/failure_reports/legacy_hmmer_budget_supplement_after_runtime_priority.json`.
+The automated exact-ID reconciliation result is:
+
+```json
+{
+  "passed": true,
+  "required_pass": 2021,
+  "allowed_pass_or_skip": 58,
+  "regressed_pass": [],
+  "failed_allowed": [],
+  "missing_required": [],
+  "unexpected": []
+}
+```
+
+Therefore this repair batch satisfies the hard gate: all 2021 historical PASS
+blocks still pass, with zero regression. This result only establishes the
+regression precondition. Its SPEC06 benefit will be counted separately and
+only as original `failed -> PASS` transitions after the frozen 2375-ID baseline
+is complete; `failed -> SKIP` will not be counted as an improvement.

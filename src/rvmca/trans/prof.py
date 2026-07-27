@@ -5442,6 +5442,83 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             except Exception:
                 return None
 
+        component_satisfiability_cache = {}
+
+        def constraint_set_componentwise_satisfiable(constraints, timeout_ms=10000):
+            """Prove full SAT by solving independent variable components."""
+            anchor_vars = expr_vars(init_sp)
+            fixed_sp_constraint = init_sp == expr_bvv(CONCRETE_REPLAY_SP, init_sp)
+            combined = []
+            seen = set()
+            all_constraints = (
+                list(candidate_solver.constraints)
+                + [fixed_sp_constraint]
+                + list(constraints)
+            )
+            for constraint in all_constraints:
+                key = str(claripy.simplify(constraint))
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append((key, constraint, expr_vars(constraint) - anchor_vars))
+
+            parent = {}
+
+            def find(variable):
+                parent.setdefault(variable, variable)
+                while parent[variable] != variable:
+                    parent[variable] = parent[parent[variable]]
+                    variable = parent[variable]
+                return variable
+
+            def union(lhs, rhs):
+                lhs_root = find(lhs)
+                rhs_root = find(rhs)
+                if lhs_root != rhs_root:
+                    parent[rhs_root] = lhs_root
+
+            for _, _, variables in combined:
+                variables = sorted(variables)
+                for variable in variables:
+                    find(variable)
+                for variable in variables[1:]:
+                    union(variables[0], variable)
+
+            anchor_only = []
+            grouped = {}
+            for entry in combined:
+                variables = entry[2]
+                if not variables:
+                    anchor_only.append(entry)
+                    continue
+                root = find(next(iter(variables)))
+                grouped.setdefault(root, []).append(entry)
+
+            def solve_component(entries):
+                component_key = tuple(sorted(key for key, _, _ in entries))
+                cached = component_satisfiability_cache.get(component_key)
+                if cached is not None:
+                    return cached
+                test_solver = claripy.Solver()
+                test_solver.timeout = timeout_ms
+                try:
+                    for _, constraint, _ in entries:
+                        test_solver.add(constraint)
+                    result = bool(test_solver.satisfiable())
+                except Exception:
+                    return None
+                component_satisfiability_cache[component_key] = result
+                return result
+
+            anchor_result = solve_component(anchor_only)
+            if anchor_result is not True:
+                return anchor_result
+            for component in grouped.values():
+                result = solve_component(anchor_only + component)
+                if result is not True:
+                    return result
+            return True
+
         def multiplicative_zero_priority(expr, constraints):
             vars_ = expr_vars(expr)
             pointer_like = bool(vars_ & (pointer_loaded_addr_vars | undef_base_vars))
@@ -9477,6 +9554,60 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         ],
                     )
                     return concrete_base_value(base_offset)
+                related_accesses = [
+                    access_inst
+                    for access_inst, addr_symbol, _, _ in mem_accesses
+                    if expr_vars(addr_symbol) & symbol_vars
+                ]
+                has_disconnected_nonlinear_constraint = any(
+                    not (expr_vars(constraint) & symbol_vars)
+                    and any(
+                        getattr(node, 'op', None) in {
+                            '__mul__', 'Mul', '__floordiv__', '__truediv__',
+                            '__div__', 'SDiv', 'UDiv',
+                        }
+                        for node in iter_ast_nodes(constraint)
+                    )
+                    for constraint in candidate_solver.constraints
+                )
+                direct_load_group = (
+                    fast_anchor
+                    and bool(related_accesses)
+                    and len(ranges) == len(related_accesses)
+                    and all(
+                        access_inst.type == IType.Load
+                        for access_inst in related_accesses
+                    )
+                    and all(
+                        not residual_constraints
+                        for _, _, _, residual_constraints in ranges
+                    )
+                    and has_disconnected_nonlinear_constraint
+                )
+                if direct_load_group:
+                    componentwise_sat = constraint_set_componentwise_satisfiable(
+                        constraints,
+                        timeout_ms=10000,
+                    )
+                    if componentwise_sat is True:
+                        for constraint in constraints:
+                            constraint_key = str(claripy.simplify(constraint))
+                            if constraint_key in added_constraint_cache:
+                                continue
+                            candidate_solver.add(constraint)
+                            added_constraint_cache.add(constraint_key)
+                            debug_constraint_add("base_offset_componentwise", constraint)
+                        reserve_stack_ranges(ranges)
+                        reserve_base_access_ranges(ranges)
+                        debug_base_choice(
+                            "choose_componentwise",
+                            base_offset=base_offset,
+                            ranges=[
+                                (offset, width, str(addr_symbol))
+                                for offset, width, addr_symbol, _ in ranges
+                            ],
+                        )
+                        return concrete_base_value(base_offset)
                 has_materialized_access_offset = any(
                     (expr_vars(addr_symbol) & symbol_vars)
                     and expr_key(addr_symbol) in addr_expr_offsets
@@ -16056,6 +16187,96 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return reject_additive_offset("no_live_base_seen")
             return True
 
+        def undefined_regs_for_vars(variables, excluded_reg):
+            return {
+                candidate_reg
+                for candidate_reg in regs_undefined
+                if candidate_reg != excluded_reg
+                and (
+                    expr_vars(reg_to_symbol.get(candidate_reg))
+                    & variables
+                )
+            }
+
+        mixed_affine_primary_residual_regs = set()
+        mixed_affine_support_regs = set()
+        for reg in regs_undefined:
+            symbol = reg_to_symbol.get(reg)
+            symbol_vars = expr_vars(symbol)
+            if not symbol_vars:
+                continue
+            direct_companions = set()
+            scaled_base_companions = set()
+            scaled_support_companions = set()
+            for _, addr_symbol, _, _ in mem_accesses:
+                if not (expr_vars(addr_symbol) & symbol_vars):
+                    continue
+                direct_residual = claripy.simplify(addr_symbol - symbol)
+                if not (expr_vars(direct_residual) & symbol_vars):
+                    direct_companions.update(undefined_regs_for_vars(
+                        expr_vars(direct_residual),
+                        reg,
+                    ))
+                scaled = scaled_symbol_affine(addr_symbol, symbol)
+                if scaled is None:
+                    continue
+                _, _, companion_constraints = scaled
+                companion_vars = set()
+                for constraint in companion_constraints:
+                    companion_vars.update(expr_vars(constraint))
+                for companion_reg in undefined_regs_for_vars(
+                    companion_vars - symbol_vars,
+                    reg,
+                ):
+                    companion_symbol = reg_to_symbol.get(companion_reg)
+                    companion_symbol_vars = expr_vars(companion_symbol)
+                    companion_residual = claripy.simplify(
+                        addr_symbol - companion_symbol
+                    )
+                    if not (
+                        expr_vars(companion_residual) & companion_symbol_vars
+                    ):
+                        scaled_base_companions.add(companion_reg)
+                    elif (
+                        scaled_symbol_affine(addr_symbol, companion_symbol)
+                        is not None
+                    ):
+                        scaled_support_companions.add(companion_reg)
+            if any(
+                direct_companion != scaled_companion
+                for direct_companion in direct_companions
+                for scaled_companion in scaled_base_companions
+            ):
+                mixed_affine_primary_residual_regs.add(reg)
+                mixed_affine_support_regs.update(
+                    scaled_support_companions - direct_companions
+                )
+
+        mixed_affine_residual_regs = (
+            mixed_affine_primary_residual_regs | mixed_affine_support_regs
+        )
+        mixed_affine_zero_constraints = [
+            reg_to_symbol[reg] == expr_bvv(0, reg_to_symbol[reg])
+            for reg in sorted(
+                mixed_affine_residual_regs,
+                key=lambda item: item.id,
+            )
+            if reg in reg_to_symbol
+        ]
+        if mixed_affine_zero_constraints:
+            _write_profile_stage(
+                name,
+                "init:materialize_init:mixed_affine_residual_zero",
+            )
+            mixed_affine_zero_committed = try_add_constraint_set_fast(
+                mixed_affine_zero_constraints,
+                timeout_ms=max(local_solver_timeout_ms, 10000),
+            )
+            if not mixed_affine_zero_committed:
+                mixed_affine_primary_residual_regs.clear()
+                mixed_affine_support_regs.clear()
+                mixed_affine_residual_regs.clear()
+
         _write_profile_stage(name, "init:materialize_init:global_constraints")
         _write_profile_stage(name, "init:materialize_init:global_constraints:same_address_load_alias")
         add_same_address_load_alias_constraints()
@@ -16968,6 +17189,26 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'direct_affine_address_base': direct_affine_address_base,
                 })}")
             val = None
+            if r in mixed_affine_residual_regs:
+                write_stage(
+                    "init:materialize_init:register",
+                    reg=r.name,
+                    phase="mixed_affine_residual_zero",
+                )
+                zero_constraint = symbol == expr_bvv(0, symbol)
+                zero_timeout_ms = max(local_solver_timeout_ms, 5000)
+                if (
+                    try_add_constraint_set_fast(
+                        [zero_constraint],
+                        timeout_ms=zero_timeout_ms,
+                    )
+                    or try_add_constraint_set_related(
+                        [zero_constraint],
+                        symbol_vars_for_fallback,
+                        timeout_ms=zero_timeout_ms,
+                    )
+                ):
+                    val = 0
             if (
                 val is None
                 and r in base_like_regs
@@ -17129,6 +17370,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 val = choose_scaled_address_register_value(symbol)
             if (
                 val is None
+                and r not in base_like_regs
+                and (not self_mul_address_residual or scaled_address_carrier_use)
+            ):
+                if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                    DEBUG(f"scaled_address_carrier_try {({
+                        'reg': r.name,
+                        'symbol': str(symbol),
+                    })}")
+                write_stage("init:materialize_init:register", reg=r.name, phase="scaled_addr_carrier")
+                val = choose_scaled_address_register_value(symbol)
+            if (
+                val is None
                 and constrained_by_materialized
                 and r not in base_like_regs
                 and not direct_affine_address_base
@@ -17146,18 +17399,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'reg': r.name,
                     'value': None if val is None else hex(val),
                 })}")
-            if (
-                val is None
-                and r not in base_like_regs
-                and (not self_mul_address_residual or scaled_address_carrier_use)
-            ):
-                if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
-                    DEBUG(f"scaled_address_carrier_try {({
-                        'reg': r.name,
-                        'symbol': str(symbol),
-                    })}")
-                write_stage("init:materialize_init:register", reg=r.name, phase="scaled_addr_carrier")
-                val = choose_scaled_address_register_value(symbol)
             if (
                 val is None
                 and r not in base_like_regs
@@ -17713,12 +17954,26 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 )
             return rebuilt
 
+        for reg in mixed_affine_primary_residual_regs:
+            base_like_regs.discard(reg)
+            base_like_sources.pop(reg, None)
+            reg_min_stack_offsets.pop(reg, None)
+
+        if verbose and mixed_affine_residual_regs:
+            print('mixed_affine_residual_regs', [
+                str(reg)
+                for reg in sorted(mixed_affine_residual_regs, key=lambda item: item.id)
+            ])
+
         ordered_undefined_regs = [
             r for r in regs_undefined
-            if r in base_like_regs
+            if r in mixed_affine_residual_regs
         ] + [
             r for r in regs_undefined
-            if r not in base_like_regs
+            if r in base_like_regs and r not in mixed_affine_residual_regs
+        ] + [
+            r for r in regs_undefined
+            if r not in base_like_regs and r not in mixed_affine_residual_regs
         ]
         for r in ordered_undefined_regs:
             if r in deferred_regs:
