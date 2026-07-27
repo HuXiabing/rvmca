@@ -74,6 +74,16 @@ def read_required_text(path: Path, allow_empty: bool = False) -> str:
     return text
 
 
+def read_stage_detail(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def run_block_worker(
     result_queue,
     case_name: str,
@@ -104,20 +114,19 @@ def run_block_worker(
         if isinstance(qemu_result, str) and qemu_result.startswith("SKIP:"):
             result = {
                 "status": "skipped",
+                "failure_stage": "skip",
                 "error": qemu_result,
                 "elapsed_s": time.monotonic() - started,
             }
         else:
-            stage = None
-            if stage_path.exists():
-                try:
-                    stage = json.loads(stage_path.read_text(encoding="utf-8")).get("stage")
-                except (OSError, json.JSONDecodeError):
-                    pass
+            stage_detail = read_stage_detail(stage_path)
+            stage = stage_detail.get("stage") if stage_detail else None
             if stage != "transform:done":
                 trace = (stdout_buffer.getvalue() + stderr_buffer.getvalue()).strip()
                 result = {
                     "status": "failed",
+                    "failure_stage": stage,
+                    "stage_detail": stage_detail,
                     "error": trace[-4000:] or f"transform stopped at stage {stage!r}",
                     "elapsed_s": time.monotonic() - started,
                 }
@@ -139,6 +148,7 @@ def run_block_worker(
                 if completed.returncode != 0 or not completed.stdout:
                     result = {
                         "status": "failed",
+                        "failure_stage": "qemu",
                         "error": (
                             f"qemu returned {completed.returncode}: "
                             f"{(completed.stdout + completed.stderr)[-4000:]}"
@@ -148,6 +158,7 @@ def run_block_worker(
                 else:
                     result = {
                         "status": "passed",
+                        "failure_stage": "done",
                         "init_binary": init_binary,
                         "block_binary": block_binary,
                         "qemu_result": completed.stdout,
@@ -155,8 +166,11 @@ def run_block_worker(
                     }
     except BaseException as exc:
         trace = stdout_buffer.getvalue() + stderr_buffer.getvalue() + traceback.format_exc()
+        stage_detail = read_stage_detail(stage_path)
         result = {
             "status": "failed",
+            "failure_stage": stage_detail.get("stage") if stage_detail else None,
+            "stage_detail": stage_detail,
             "error": f"{type(exc).__name__}: {exc}\n{trace[-4000:]}",
             "elapsed_s": time.monotonic() - started,
         }
@@ -225,9 +239,18 @@ def run_block(
         process.join(0)
         if process.is_alive():
             stop_process(process)
+            stage_path = OUTPUT_PATH / f"{case_name}.stage.json"
+            stage_detail = read_stage_detail(stage_path)
+            timeout_stage = stage_detail.get("stage") if stage_detail else None
+            error = f"block timed out after {timeout_s}s"
+            if timeout_stage:
+                error += f" at {timeout_stage}"
             return {
                 "status": "timeout",
-                "error": f"block timed out after {timeout_s}s",
+                "failure_stage": timeout_stage,
+                "timeout_stage": timeout_stage,
+                "stage_detail": stage_detail,
+                "error": error,
                 "elapsed_s": time.monotonic() - started,
             }
 
