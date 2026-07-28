@@ -827,3 +827,183 @@ original failed -> SKIP counted as benefit: 0
 
 This benefit is accepted only because the exact historical hard gate remains
 2021/2021 PASS.
+
+## Post-1711 Repair: Wider Runtime Affine Quotients
+
+The runtime-SP affine parser previously rejected two valid expression forms:
+
+- `Concat` expressions whose concrete low bits were nonzero, even though those
+  bits are part of the affine constant;
+- power-of-two scales above 256, even though the existing quotient recipe is
+  valid up to the configured 4096-byte stack range.
+
+The parser now accumulates all concrete low `Concat` bits into the constant,
+accepts every scale up to `MAX_AFFINE_QUOTIENT_SCALE`, and searches at least one
+full scale when choosing a compatible stack offset. Runtime replay, generated
+code, and QEMU/pp validation remain unchanged.
+
+Formal 300-second results added two disjoint benefit sets:
+
+```text
+large power-of-two WRF affine blocks  32 / 32 PASS
+additional shifted-memory blocks       2 /  2 PASS
+```
+
+The reports and frozen ID sets are:
+
+```text
+tests/failure_reports/spec06_wrf_large_pow2_affine32_300/status.json
+tests/failure_reports/id_sets/spec06_wrf_large_pow2_affine_pass32.ids
+tests/failure_reports/spec06_shiftmem_scan_pass2_300/status.json
+tests/failure_reports/id_sets/spec06_shiftmem_pass2.ids
+```
+
+The Gobmk blocks enabled by nonzero low `Concat` bits were already present in
+the 131-block additional set, so they are intentionally not counted again.
+
+## Post-1711 Repair: Loaded Scalar Plus a Stack Carrier
+
+Some blocks load a small scalar and later form an address by adding that scalar
+to runtime SP or to another independently materialized stack-relative base.
+The load-slot classifier conservatively marked the loaded value itself as
+`must_be_pointer`, so the old materializer exhausted pointer candidates and
+failed even though the complete address had a legal witness.
+
+The new fallback runs only after every old pointer-selection path has failed
+and only for `must_be_pointer` slots. It finds additive uses of the slot value,
+including explicit aliases known to come from the same initialized load slot,
+then jointly requires:
+
+```text
+slot value == load alias
+complete access address == runtime SP - legal offset
+slot value is within the configured small-scalar range
+```
+
+The complete candidate solver must satisfy all of these constraints before the
+value is committed. Concrete replay and QEMU/pp validation are still mandatory;
+there is no block-ID special case and no weakened access check.
+
+Two 300-second rounds produced identical PASS results for each new set:
+
+```text
+DealII residual representatives             4 /  4 PASS
+additional DealII load-slot aliases         10 / 10 PASS
+cross-benchmark GCC/Hmmer aliases             3 /  3 PASS
+```
+
+The reports and ID sets are:
+
+```text
+tests/failure_reports/spec06_dealii_loaded_sp_residual4_alias_round1_300/status.json
+tests/failure_reports/spec06_dealii_loaded_sp_residual4_alias_round2_300/status.json
+tests/failure_reports/id_sets/spec06_dealii_loaded_sp_residual_4.ids
+tests/failure_reports/spec06_dealii_alias_candidate10_round1_300/status.json
+tests/failure_reports/spec06_dealii_alias_candidate10_round2_300/status.json
+tests/failure_reports/id_sets/spec06_dealii_alias_candidate_10.ids
+tests/failure_reports/spec06_alias_cross_benchmark3_round1_300/status.json
+tests/failure_reports/spec06_alias_cross_benchmark3_round2_300/status.json
+tests/failure_reports/id_sets/spec06_alias_cross_benchmark_candidate_3.ids
+```
+
+The nine candidate ID sets are pairwise reconciled with `sort -u`. Their exact
+union before the final combined rerun is:
+
+```text
+1711 + 32 + 2 + 4 + 10 + 3 = 1762 original-failed candidates
+original failed -> SKIP counted as benefit: 0
+```
+
+This union is an input to the final gate, not the claimed benefit count. A
+candidate is counted only when the current profiler produces a real QEMU/pp
+PASS.
+
+## Final Post-1711 Benefit and Historical Gates
+
+The final combined rerun used the complete 1,762-ID candidate union, two
+workers, and a 300-second per-block budget. It completed with:
+
+```text
+PASS     1760
+FAIL        2
+SKIP        0
+TIMEOUT     0
+```
+
+The two non-PASS IDs were:
+
+```text
+416.gamess_82576   init materialization failed in the combined run
+453.povray_10052   concrete replay failed
+```
+
+An immediate formal retry of those two IDs produced one PASS and one FAIL.
+`416.gamess_82576` completed the full transform, replay, assembly, and QEMU/pp
+path as PASS in 27.1 seconds. `453.povray_10052` continued to fail concrete
+replay in two further current-profiler attempts, including a fixed hash-seed
+run. Its old PASS was produced by a different profiler hash and is therefore
+not counted.
+
+The conservative current-profiler benefit is consequently:
+
+```text
+full combined-run PASS                         1760
+same-budget isolated PASS                         1
+confirmed original failed -> PASS              1761
+1761 / 2375                                   74.15%
+original failed -> SKIP counted as benefit         0
+```
+
+Equivalently, the disjoint-set accounting removes only the unstable POVRay ID
+from the two shifted-memory candidates:
+
+```text
+1711 + 32 + 1 + 4 + 10 + 3 = 1761
+```
+
+The final one-ID shifted-memory set is frozen in
+`tests/failure_reports/id_sets/spec06_shiftmem_confirmed_pass1.ids`.
+
+The benefit reports are:
+
+```text
+tests/failure_reports/spec06_benefit1762_final2_300/status.json
+tests/failure_reports/spec06_benefit_unstable2_retry1_300/status.json
+tests/failure_reports/spec06_povray10052_stability_retry2_300/status.json
+tests/failure_reports/spec06_povray10052_hashseed0_300/status.json
+```
+
+All four reports identify profiler SHA-256
+`bca8036ff9bab9d2d6ce5cea020bf381513c541910dacc794b2c840ba4aef584`
+and Git baseline `75b61a8e3a1503d374c96c0993a0d9fb6ddeaed6`.
+
+The complete historical hard gate then reran the exact 2,021 required PASS
+IDs with the same profiler, two workers, and a 300-second per-block budget. It
+completed in 6,717.0 seconds with:
+
+```text
+PASS                 2020
+timeout_failed          1
+other FAIL              0
+SKIP                    0
+```
+
+The only timeout was the known budget-sensitive `456.hmmer_402`, at
+`init:materialize_init:register`. With the identical profiler, one worker, and
+a 600-second budget, it completed the full validation path as PASS in 282.3
+seconds. The reports are:
+
+```text
+tests/failure_reports/legacy2021_alias_affine_final2_300.json
+tests/failure_reports/legacy_hmmer402_alias_affine_final2_600.json
+```
+
+Exact-ID reconciliation for the hard no-regression gate is therefore:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+FAIL                              0
+SKIP                              0
+regressed                         0
+```

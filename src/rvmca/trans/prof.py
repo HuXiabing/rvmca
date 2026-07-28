@@ -87,7 +87,6 @@ HEURISTIC_SOLVER_TIMEOUT_MS = 500
 ENABLE_POINTER_LOAD_ANCHORS = False
 RUNTIME_SP_ALIGNMENT = 16
 MAX_AFFINE_QUOTIENT_SCALE = STACK_RANGE
-MAX_LEGACY_POWER_OF_TWO_AFFINE_SCALE = 256
 
 
 def _scaled_stack_transform_for_value(
@@ -10287,17 +10286,23 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return None
                 if op == 'Concat' and args:
                     low_width = 0
+                    low_const = 0
                     for low_arg in args[1:]:
                         low_value = concrete_expr_value(low_arg)
-                        if low_value not in (0, None):
-                            return None
                         if low_value is None:
                             return None
+                        low_const = (
+                            (low_const << low_arg.size()) | low_value
+                        ) & mask
                         low_width += low_arg.size()
                     high = parse(args[0])
                     if high is None:
                         return None
-                    return high[0] << low_width, (high[1] << low_width) & mask, high[2]
+                    return (
+                        high[0] << low_width,
+                        ((high[1] << low_width) + low_const) & mask,
+                        high[2],
+                    )
                 return None
 
             parsed = parse(expr)
@@ -10305,11 +10310,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return None
             scale, const, constraints = parsed
             if scale < min_scale or scale > MAX_AFFINE_QUOTIENT_SCALE:
-                return None
-            if (
-                scale > MAX_LEGACY_POWER_OF_TWO_AFFINE_SCALE
-                and not (scale & (scale - 1))
-            ):
                 return None
             return scale, const & mask, constraints
 
@@ -10772,9 +10772,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if group_low > align:
                     starts.insert(0, group_low)
                 seen_offsets = set()
+                search_span = max(512, abs(scale))
                 for start in starts:
                     start = _align_up(max(1, start), align)
-                    for access_offset in range(start, min(STACK_RANGE, start + 512) + 1, align):
+                    for access_offset in range(
+                        start,
+                        min(STACK_RANGE, start + search_span) + 1,
+                        align,
+                    ):
                         if access_offset in seen_offsets:
                             continue
                         seen_offsets.add(access_offset)
@@ -11274,8 +11279,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             min_pointer_offset=None,
             allow_pointer_scalar_fallback=True,
             pointer_candidate_ok=None,
+            pointer_alias_exprs=None,
         ):
             avoid_stack_offsets = [] if avoid_stack_offsets is None else avoid_stack_offsets
+            pointer_alias_exprs = [] if pointer_alias_exprs is None else pointer_alias_exprs
             if pointer_like:
                 offset_expr = init_sp - expr
                 pointer_vars = expr_vars(expr)
@@ -12556,7 +12563,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if not pointer_vars:
                         return False
                     saw_related_address = False
-                    base_like_residual_vars = set(pointer_loaded_addr_vars) | set(undef_base_vars)
+                    base_like_residual_vars = (
+                        set(pointer_loaded_addr_vars)
+                        | set(undef_base_vars)
+                    )
                     for load_inst, rd_symbol, _, _ in address_source_loads:
                         if load_inst.width == 8:
                             base_like_residual_vars.update(expr_vars(rd_symbol))
@@ -12575,6 +12585,136 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             return False
                         saw_related_address = True
                     return saw_related_address
+
+                def additive_pointer_scalar_candidates():
+                    base_like_residual_vars = (
+                        set(pointer_loaded_addr_vars)
+                        | set(undef_base_vars)
+                        | set(expr_vars(init_sp))
+                    )
+                    for load_inst, rd_symbol, _, _ in address_source_loads:
+                        if load_inst.width == 8:
+                            base_like_residual_vars.update(expr_vars(rd_symbol))
+                    for reg_symbol in reg_to_symbol.values():
+                        base_like_residual_vars.update(expr_vars(reg_symbol))
+
+                    operands = [expr]
+                    seen_operand_keys = {expr_key(expr)}
+                    for alias_expr in pointer_alias_exprs:
+                        try:
+                            if alias_expr.size() != expr.size():
+                                continue
+                        except Exception:
+                            continue
+                        alias_key = expr_key(alias_expr)
+                        if alias_key in seen_operand_keys:
+                            continue
+                        seen_operand_keys.add(alias_key)
+                        operands.append(alias_expr)
+
+                    additive_accesses = []
+                    all_operand_vars = set()
+                    for operand in operands:
+                        all_operand_vars.update(expr_vars(operand))
+                    for _, access_addr_symbol, _, access_width in mem_accesses:
+                        access_vars = expr_vars(access_addr_symbol)
+                        operand = next(
+                            (
+                                candidate_operand
+                                for candidate_operand in operands
+                                if access_vars & expr_vars(candidate_operand)
+                            ),
+                            None,
+                        )
+                        if operand is None:
+                            continue
+                        residual = claripy.simplify(access_addr_symbol - operand)
+                        residual_vars = expr_vars(residual)
+                        if residual_vars & all_operand_vars:
+                            continue
+                        if not residual_vars:
+                            continue
+                        if not (residual_vars & base_like_residual_vars):
+                            continue
+                        alias_constraints = []
+                        if expr_key(operand) != expr_key(expr):
+                            alias_constraints.append(operand == expr)
+                        additive_accesses.append((
+                            access_addr_symbol,
+                            access_width,
+                            residual,
+                            alias_constraints,
+                        ))
+
+                    additive_ok = bool(additive_accesses)
+                    debug_pointer_residual(
+                        'additive_scalar_gate',
+                        expr=str(expr),
+                        allowed=additive_ok,
+                    )
+                    if not additive_ok:
+                        return []
+                    candidates = []
+                    seen_candidates = set()
+                    for (
+                        access_addr_symbol,
+                        access_width,
+                        residual,
+                        alias_constraints,
+                    ) in additive_accesses:
+                        align = max(1, access_width)
+                        first_offset = _align_up(
+                            max(INIT_PTR_MIN_OFFSET, access_width),
+                            align,
+                        )
+                        target_offsets = [first_offset]
+                        target_offsets.extend(
+                            _align_up(used_offset + max(used_width, access_width), align)
+                            for used_offset, used_width in avoid_stack_offsets
+                        )
+                        for access_offset in target_offsets:
+                            if access_offset <= 0 or access_offset > STACK_RANGE:
+                                continue
+                            candidate_expr = claripy.simplify(
+                                init_sp
+                                - expr_bvv(access_offset, init_sp)
+                                - residual
+                            )
+                            candidate_value = concrete_value_from_materialized(candidate_expr)
+                            target_constraint = access_addr_symbol == (
+                                init_sp - expr_bvv(access_offset, init_sp)
+                            )
+                            target_constraints = alias_constraints + [target_constraint]
+                            if candidate_value is None:
+                                scalar_limit = expr_bvv(STACK_RANGE, expr)
+                                negative_limit = expr_bvv(-STACK_RANGE, expr)
+                                small_scalar_constraint = claripy.Or(
+                                    claripy.ULE(expr, scalar_limit),
+                                    claripy.UGE(expr, negative_limit),
+                                )
+                                candidate_value = solver_min_with(
+                                    expr,
+                                    target_constraints + [small_scalar_constraint],
+                                )
+                            debug_pointer_residual(
+                                'additive_scalar_candidate',
+                                expr=str(expr),
+                                residual=str(residual),
+                                access_offset=access_offset,
+                                candidate_expr=str(candidate_expr),
+                                candidate_value=candidate_value,
+                            )
+                            if candidate_value is None:
+                                continue
+                            signed_value = _signed_u64(candidate_value)
+                            if not -STACK_RANGE <= signed_value <= STACK_RANGE:
+                                continue
+                            candidate_value &= ((1 << expr.size()) - 1)
+                            if candidate_value in seen_candidates:
+                                continue
+                            seen_candidates.add(candidate_value)
+                            candidates.append((candidate_value, target_constraints))
+                    return candidates
 
                 if allow_pointer_scalar_fallback and can_zero_additive_pointer_operand():
                     zero_constraint = expr == expr_bvv(0, expr)
@@ -12620,6 +12760,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             candidate_solver.add(expr == expr_bvv(scalar_value, expr))
                             if verbose:
                                 print('choose_pointer_like_scalar_fallback_selected', str(expr), scalar_value)
+                            return scalar_value
+                if not allow_pointer_scalar_fallback:
+                    for scalar_value, target_constraints in additive_pointer_scalar_candidates():
+                        scalar_constraint = expr == expr_bvv(scalar_value, expr)
+                        scalar_sat = try_add_constraint_set_fast(
+                            target_constraints + [scalar_constraint],
+                            timeout_ms=max(pointer_confirm_timeout_ms, 1000),
+                        )
+                        debug_pointer_residual(
+                            'additive_scalar_sat',
+                            expr=str(expr),
+                            scalar_value=_signed_u64(scalar_value),
+                            satisfiable=scalar_sat,
+                        )
+                        if scalar_sat:
+                            if verbose:
+                                print(
+                                    'choose_pointer_like_additive_scalar_selected',
+                                    str(expr),
+                                    _signed_u64(scalar_value),
+                                )
                             return scalar_value
                 raise AssertionError(f"cannot choose stack pointer value for {expr}")
 
@@ -14100,6 +14261,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     min_pointer_offset=slot.get('min_pointer_offset'),
                     allow_pointer_scalar_fallback=not slot.get('must_be_pointer'),
                     pointer_candidate_ok=pointer_candidate_related_ranges_ok,
+                    pointer_alias_exprs=slot.get('value_exprs', []),
                 )
             except AssertionError:
                 if slot.get('pointer_like') or slot.get('sp_affine'):

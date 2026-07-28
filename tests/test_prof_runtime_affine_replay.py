@@ -6,6 +6,18 @@ from rvmca.config import OUTPUT_PATH, TOOLS_PATH
 from rvmca.trans.prof import transform_for_profiling
 
 
+LARGE_POWER_OF_TWO_AFFINE_BLOCK_ASM = [
+    "lui a5,0x900",
+    "slli a7,s0,0xa",
+    "addi a5,a5,784",
+    "add a5,a5,a7",
+    "ld s4,336(a5)",
+    "ld a4,304(a5)",
+    "ld a3,328(a5)",
+    "ld s0,296(a5)",
+]
+
+
 def test_runtime_affine_loaded_value_address_replays_safely(tmp_path):
     asm_path = tmp_path / "runtime_affine_loaded_value_address.S"
     asm_path.write_text(
@@ -54,6 +66,54 @@ def test_runtime_affine_loaded_value_address_replays_safely(tmp_path):
         transform_for_profiling(asm_path, verbose=True)
         stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
         assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_large_power_of_two_affine_address_uses_runtime_sp(tmp_path):
+    asm_path = tmp_path / "large_power_of_two_affine_address.S"
+    asm_path.write_text(
+        "\n".join(LARGE_POWER_OF_TWO_AFFINE_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "li x27, 0x400" in init_asm
+        assert "divu x8, x8, x27" in init_asm
+
         completed = subprocess.run(
             [
                 "qemu-riscv64",
