@@ -644,3 +644,186 @@ regressed                         0
 
 This satisfies the hard no-regression condition for the 1,433-block stable
 failed-to-PASS lower bound.
+
+## Additional General Repair Patterns
+
+The final profiler for this round has SHA-256:
+
+```text
+e4f2dcc10dd8d0f0ab287fc219ee8ed5c0b98ee48e01486e33b2b1d3b62a459e
+```
+
+This round extends the generator with general, structure-based repairs. It
+does not special-case block IDs and leaves alternate-SP replay, assembly, and
+the real QEMU/pp measurement checks unchanged.
+
+- Signed affine factors and stable residual constraints can participate in a
+  runtime-SP quotient recipe when every affected access proves the same
+  relation.
+- Coupled live-ins are anchored together only when symbolic translation proves
+  that shifting the group shifts the final address by the same delta. A lone
+  additive live-in is not over-constrained.
+- Loads whose symbols feed the failing address are considered during prefix
+  repair even when they were initially classified as scalar loads.
+- Pointer-slot collision repair accounts for both already materialized memory
+  and planned slots, so a later pointer value cannot overwrite an intermediate
+  scalar source.
+
+The corresponding structural tests cover truncated differences, scaled
+indices, store-forwarded address sums, and planned mixed-width pointer chains.
+The final targeted rerun reported:
+
+```text
+15 passed in 112.99s
+```
+
+An earlier broader related-test run on the same profiler hash reported 31
+passes. Both test runs exercise generated programs through the real QEMU/pp
+path where applicable.
+
+## Repair: Dataflow-Grouped LUI/AUIPC Rebasing
+
+The old normalization independently changed every `lui` and `auipc`
+immediate to zero. That destroys a relative offset when two or more U-format
+values jointly contribute to one final memory address. A first repair used one
+global reference, which recovered 16 Gobmk blocks but incorrectly coupled
+unrelated constants and regressed three historical PASS blocks:
+
+```text
+465.tonto_24430
+481.wrf_3218
+481.wrf_41501
+```
+
+The final rule propagates each U-format definition through static register
+dataflow and unions definitions only when they jointly reach the base of the
+same load, store, or atomic access. Each resulting address family uses one
+shared reference, preserving its pairwise immediate differences. Unrelated
+families are rebased independently. Signed 20-bit immediate handling also
+keeps the symbolic model and real RISC-V sign extension consistent.
+
+Validation with the final implementation:
+
+```text
+Gobmk relative-LUI cluster       16 PASS / 12 FAIL
+U-format-affected historical gate 221 / 221 PASS
+known historical regressions         3 / 3 PASS
+```
+
+The reports are
+`tests/failure_reports/spec06_gobmk_relative_lui28_dataflow_300/`,
+`tests/failure_reports/legacy2021_lui_dataflow_static_fallback_300.json`, and
+`tests/failure_reports/legacy_lui_dataflow_regress3_300.json`.
+
+## Repair: Stable Symbol for a Downstream Address Load
+
+Angr can occasionally leave a symbolic load's destination register unchanged
+and later create a different unconstrained symbol when that register is used
+as a memory base. Those two symbols cannot represent one legal initial-memory
+value, so candidate replay fails even though a witness exists.
+
+The generator now detects this condition only when the affected load really is
+the base of a later memory access. It then discards the incomplete dynamic
+collection for that block and invokes the existing instruction-level memory
+collector, which keeps one load symbol through its downstream address
+dataflow. This is a model-reconstruction fallback, not a replay bypass.
+
+Representative block `481.wrf_26053` changed from replay failure to a complete
+QEMU/pp PASS. The fixed WRF family then completed the formal gate as:
+
+```text
+original failed -> PASS  147 / 147
+original failed -> SKIP    0
+```
+
+The report is
+`tests/failure_reports/spec06_wrf_static_fallback_pass147_300/status.json`, and
+the fixed input set is
+`tests/failure_reports/id_sets/spec06_wrf_static_fallback_pass147.ids`.
+
+## Additional Failed-to-PASS Accounting
+
+A disjoint 136-block candidate union covering the other repaired structural
+patterns completed with:
+
+```text
+original failed -> PASS  131
+original failed -> FAIL    5
+original failed -> SKIP    0
+original failed -> TIMEOUT 0
+```
+
+The five outcomes not counted as benefit are:
+
+```text
+416.gamess_83495
+445.gobmk_10300
+447.dealII_30335
+464.h264ref_7210
+464.h264ref_7608
+```
+
+The report is
+`tests/failure_reports/spec06_candidate136_e4f2dc_300/status.json`. Only its
+131 PASS IDs are frozen in
+`tests/failure_reports/id_sets/spec06_additional_failed_to_pass_131.ids`.
+This set, the 147-block WRF set, and the previously established 1,433-block
+set have pairwise-empty intersections.
+
+## Final Benefit and Historical Gates
+
+The previously established 1,433 original-failed PASS IDs were rerun from
+scratch with the final profiler, two workers, and a 300-second per-block
+budget:
+
+```text
+PASS     1433
+FAIL        0
+SKIP        0
+TIMEOUT     0
+```
+
+The persistent report is
+`tests/failure_reports/spec06_stable1433_e4f2dc_300/status.json`.
+
+The complete historical hard gate then used the exact 2,021 required PASS ID
+set, two workers, and the same 300-second budget. It completed in 6,456.2
+seconds with:
+
+```text
+PASS             2020
+timeout_failed      1
+FAIL excluding timeout 0
+SKIP                0
+```
+
+The only budget timeout was the previously documented
+`456.hmmer_402`, at `init:materialize_init:register`. With the identical
+profiler hash, one worker, and a 600-second budget, it completed the full
+transform, replay, assembly, and QEMU/pp path as PASS in 282.0 seconds. The
+reports are:
+
+```text
+tests/failure_reports/legacy2021_e4f2dc_full_300.json
+tests/failure_reports/legacy_hmmer402_e4f2dc_600.json
+```
+
+Exact-ID reconciliation is therefore:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+regressed                         0
+```
+
+The three disjoint benefit sets establish the final verified lower bound for
+this repair series:
+
+```text
+1433 + 147 + 131 = 1711 original failed -> PASS
+1711 / 2375 = 72.04%
+original failed -> SKIP counted as benefit: 0
+```
+
+This benefit is accepted only because the exact historical hard gate remains
+2021/2021 PASS.

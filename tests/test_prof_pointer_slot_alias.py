@@ -125,3 +125,49 @@ def test_repeated_gp_pointer_loads_keep_nonclobbered_slot_alias(tmp_path):
         encoding="utf-8",
     )
     _assert_profiled_program_runs(asm_path)
+
+
+def test_downstream_pointer_slot_does_not_clobber_intermediate_scalar(tmp_path):
+    asm_path = tmp_path / "mixed_width_pointer_chain.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a4,8(a5)",
+                "lw a5,0(a4)",
+                "addiw a5,a5,-1",
+                "slli a5,a5,0x3",
+                "add a4,a4,a5",
+                "ld a5,8(a4)",
+                "sd a0,24(a5)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)
+
+
+def test_prior_store_is_forwarded_into_failing_address_sum(tmp_path):
+    asm_path = tmp_path / "store_forwarded_address_sum.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a5,-888(gp)",
+                "ld a4,0(a5)",
+                "sd zero,144(a4)",
+                "ld a4,0(a5)",
+                "sd zero,8(a4)",
+                "ld a4,0(a5)",
+                "ld a5,0(a4)",
+                "ld a4,8(a4)",
+                "add a5,a5,a4",
+                "sb zero,0(a5)",
+                "ld a5,0(s1)",
+                "lbu a5,163(a5)",
+                "andi a5,a5,4",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)

@@ -22,6 +22,58 @@ BLOCK_ASM = [
     "lw s0,0(a5)",
 ]
 
+TRANSLATED_DIFFERENCE_BLOCK_ASM = [
+    "sub s5,s5,s4",
+    "slli a5,s5,0x20",
+    "srli a5,a5,0x20",
+    "add a5,s4,a5",
+    "sb zero,0(a5)",
+    "addi a4,zero,61",
+    "ld t4,8(sp)",
+    "addi s2,a0,0",
+    "sw s5,8(a0)",
+    "sd s4,16(a0)",
+    "sh a4,6(a0)",
+]
+
+TRUNCATED_SCALED_INDEX_BLOCK_ASM = [
+    "slli a5,s3,0x4",
+    "lbu a4,2(s7)",
+    "sub a5,a5,s3",
+    "slli a5,a5,0x2",
+    "sub a5,a5,s3",
+    "add a5,a5,a4",
+    "lui a4,0x388",
+    "slli a5,a5,0x2",
+    "addi a4,a4,1352",
+    "add a5,a4,a5",
+    "lw a2,0(a5)",
+    "addi a3,a0,0",
+    "addi a1,s5,0",
+    "addi a0,s4,0",
+]
+
+SIMPLE_ADDITIVE_ADDRESS_BLOCK_ASM = [
+    "addi t1,s9,1",
+    "add a5,s5,t1",
+    "lbu a1,0(a5)",
+    "ld a5,328(s7)",
+    "slli t1,t1,0x3",
+    "slli a1,a1,0x3",
+    "add a5,a5,a1",
+    "add a1,s6,t1",
+    "ld t3,0(a5)",
+    "ld a1,0(a1)",
+    "slli a5,s11,0x2",
+    "add t3,t3,a5",
+    "add a1,a1,a5",
+    "lw t4,0(t3)",
+    "lw a1,0(a1)",
+    "lui t3,0xc5219",
+    "addi t3,t3,1872",
+    "subw a1,a1,t4",
+]
+
 
 def test_scaled_quotient_recipe_tracks_register_and_address_values():
     recipe = ("affine_scaled_quotient", -452, 4, 8)
@@ -99,6 +151,111 @@ def test_shifted_difference_address_is_generated_with_runtime_sp_init(tmp_path):
         assert "li x27, 0x4" in init_asm
         assert "divu x8, x8, x27" in init_asm
         assert "slli x8, x8, 3" in init_asm
+
+        completed = run_qemu(
+            OUTPUT_PATH / f"{asm_path.stem}.init",
+            OUTPUT_PATH / f"{asm_path.stem}.code",
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_truncated_difference_live_ins_track_runtime_sp_together(tmp_path):
+    asm_path = tmp_path / "truncated_difference_live_ins.S"
+    asm_path.write_text(
+        "\n".join(TRANSLATED_DIFFERENCE_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        completed = run_qemu(
+            OUTPUT_PATH / f"{asm_path.stem}.init",
+            OUTPUT_PATH / f"{asm_path.stem}.code",
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_truncated_scaled_index_gets_runtime_sp_recipe(tmp_path):
+    asm_path = tmp_path / "truncated_scaled_index.S"
+    asm_path.write_text(
+        "\n".join(TRUNCATED_SCALED_INDEX_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        completed = run_qemu(
+            OUTPUT_PATH / f"{asm_path.stem}.init",
+            OUTPUT_PATH / f"{asm_path.stem}.code",
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_simple_additive_address_does_not_anchor_one_live_in(tmp_path):
+    asm_path = tmp_path / "simple_additive_address.S"
+    asm_path.write_text(
+        "\n".join(SIMPLE_ADDITIVE_ADDRESS_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
 
         completed = run_qemu(
             OUTPUT_PATH / f"{asm_path.stem}.init",

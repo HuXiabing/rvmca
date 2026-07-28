@@ -25,6 +25,7 @@
 import json
 import os
 import time
+from itertools import combinations
 from pathlib import Path
 from typing import List, Tuple
 
@@ -448,12 +449,12 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
 
 
 def fix_lui_auipc_imm(prog: Program) -> Program:
-    """Set imm to 0 for lui/auipc instructions.
+    """Rebase related lui/auipc immediates without destroying differences.
 
-    This is useful to avoid illegal memory access caused by large random immediates.
-    lui rd, imm  -> lui rd, 0
-    auipc rd, imm -> auipc rd, 0
-    Assuming the specific imm value doesn't affect the block's execution cycle count.
+    U-format values that contribute to the same memory address form one
+    address family.  Subtracting one shared reference inside each family keeps
+    its relative offsets while allowing unrelated constants to be zeroed
+    independently.
 
     Args:
         prog: The program to modify
@@ -462,12 +463,83 @@ def fix_lui_auipc_imm(prog: Program) -> Program:
         Modified program
     """
     prog = copy.deepcopy(prog)
-    for i, inst in enumerate(prog.insts):
-        if isinstance(inst, UFmtInst) and inst.name in ['lui', 'auipc']:
-            # Set imm to 0 for lui/auipc instructions
-            # lui rd, imm -> lui rd, 0
-            # auipc rd, imm -> auipc rd, 0
-            inst.imm = 0x0
+    u_insts = [
+        inst
+        for inst in prog.insts
+        if isinstance(inst, UFmtInst) and inst.name in {'lui', 'auipc'}
+    ]
+    if not u_insts:
+        return prog
+
+    imm_bits = 20
+    imm_mask = (1 << imm_bits) - 1
+    imm_sign = 1 << (imm_bits - 1)
+
+    def signed_imm(imm):
+        imm &= imm_mask
+        return imm - (1 << imm_bits) if imm & imm_sign else imm
+
+    inst_to_idx = {id(inst): idx for idx, inst in enumerate(u_insts)}
+    parents = list(range(len(u_insts)))
+
+    def find(idx):
+        while parents[idx] != idx:
+            parents[idx] = parents[parents[idx]]
+            idx = parents[idx]
+        return idx
+
+    def union(indices):
+        indices = list(indices)
+        for idx in indices[1:]:
+            lhs = find(indices[0])
+            rhs = find(idx)
+            if lhs != rhs:
+                parents[rhs] = lhs
+
+    reg_sources = {}
+    for inst in prog.insts:
+        if id(inst) in inst_to_idx:
+            reg_sources[inst.rd] = {inst_to_idx[id(inst)]}
+            continue
+
+        if inst.type in {IType.Load, IType.Store, IType.Amo}:
+            union(reg_sources.get(inst.rs1, set()))
+            defined = inst.get_def()
+            if defined is not None:
+                reg_sources[defined] = set()
+            continue
+
+        if isinstance(inst, RFmtInst):
+            reg_sources[inst.rd] = (
+                set(reg_sources.get(inst.rs1, set()))
+                | set(reg_sources.get(inst.rs2, set()))
+            )
+            continue
+
+        if isinstance(inst, IFmtInst):
+            reg_sources[inst.rd] = set(reg_sources.get(inst.rs1, set()))
+            continue
+
+        defined = inst.get_def()
+        if defined is not None:
+            reg_sources[defined] = set()
+
+    groups = {}
+    for idx, inst in enumerate(u_insts):
+        groups.setdefault(find(idx), []).append(inst)
+
+    for group in groups.values():
+        signed_imms = [signed_imm(inst.imm) for inst in group]
+        min_imm = min(signed_imms)
+        max_imm = max(signed_imms)
+        # The symbolic U-format model treats its immediate as non-negative,
+        # while real RISC-V execution sign-extends bit 19.  Keep normalized
+        # immediates in their common non-negative range so replay and QEMU see
+        # the same value.
+        reference = min_imm if max_imm - min_imm < imm_sign else None
+
+        for inst, imm in zip(group, signed_imms):
+            inst.imm = 0 if reference is None else imm - reference
     return prog
 
 
@@ -2292,6 +2364,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             })
         solver = static_collect_memory_accesses()
     else:
+        dynamic_address_load_incomplete = False
         for inst_idx, inst in access_insts:
             _write_profile_stage(name, "init:symbolic_memory_access_collection")
             target_addr = begin_addr + inst_idx * 4  # 模拟执行，停在指令即将执行的那一刻
@@ -2326,6 +2399,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if getattr(addr_symbol, 'variables', set()) and (
                 not getattr(rd_symbol, 'variables', set()) or old_rd_key == rd_key
             ):
+                if id(inst) in mem_base_ids:
+                    dynamic_address_load_incomplete = True
                 rd_symbol = claripy.BVS(f'symbolic_read_forced_{len(load_accesses)}_{inst_idx}', 64)
                 reg_offset, reg_size = proj.arch.registers[inst.rd.name]
                 simgr.found[0].registers.store(reg_offset, rd_symbol, size=reg_size)
@@ -2337,6 +2412,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 mem_base_map[inst] = load_entry
             if verbose and id(inst) in mem_base_ids:
                 DEBUG(f'memory unconstrained symbol {name}: {rd_symbol = } {addr_symbol = }')
+
+        if dynamic_address_load_incomplete:
+            # Angr occasionally leaves rd unchanged for a symbolic load and
+            # later creates a different unconstrained symbol when rd is used
+            # as an address.  The two symbols then cannot describe one legal
+            # initial-memory value.  Recollect this small block with the
+            # existing instruction-level model, which gives each load one
+            # stable symbol throughout its downstream address dataflow.
+            mem_accesses.clear()
+            load_accesses.clear()
+            store_accesses.clear()
+            mem_base_map.clear()
+            solver = static_collect_memory_accesses()
+            use_static_memory_collection = True
 
     if verbose:
         print('load_accesses', [
@@ -10161,7 +10250,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         if expr_vars(factor_arg):
                             continue
                         factor = concrete_expr_value(factor_arg)
-                        if factor is None or factor <= 0 or factor > MAX_AFFINE_QUOTIENT_SCALE:
+                        if factor is None:
+                            continue
+                        factor_bits = factor_arg.size()
+                        if factor & (1 << (factor_bits - 1)):
+                            factor -= 1 << factor_bits
+                        if (
+                            factor == 0
+                            or abs(factor) > MAX_AFFINE_QUOTIENT_SCALE
+                        ):
                             continue
                         parsed = parse(affine_arg)
                         if parsed is None:
@@ -10588,8 +10685,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 scale, const, scaled_constraints = scaled
                 runtime_accesses = []
+                runtime_constraint_keys = {
+                    str(claripy.simplify(constraint))
+                    for constraint in scaled_constraints
+                }
+                runtime_blocked_vars = symbol_vars | expr_vars(init_sp)
+
+                def runtime_stable_constraints(constraints):
+                    return all(
+                        not (expr_vars(constraint) & runtime_blocked_vars)
+                        for constraint in constraints
+                    )
+
                 runtime_recipe_eligible = (
-                    not scaled_constraints
+                    runtime_stable_constraints(scaled_constraints)
                     and find_reg_by_name(TEMP_REG) not in regs_undefined
                     and find_reg_by_name(TEMP_REG2) not in regs_undefined
                 )
@@ -10604,7 +10713,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         runtime_recipe_eligible = False
                         continue
                     other_scale, other_const, other_constraints = other_scaled
-                    if other_scale != scale or other_constraints:
+                    other_constraint_keys = {
+                        str(claripy.simplify(constraint))
+                        for constraint in other_constraints
+                    }
+                    if (
+                        other_scale != scale
+                        or not runtime_stable_constraints(other_constraints)
+                        or other_constraint_keys != runtime_constraint_keys
+                    ):
                         runtime_recipe_eligible = False
                         continue
                     runtime_accesses.append((
@@ -21734,6 +21851,31 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     ):
         constraints = []
         seen_loads = set()
+        protected_idx = last_prefix_fail_info.get('protected_access_idx')
+        failing_address_vars = set()
+        if protected_idx is not None:
+            for _, addr_symbol, inst_idx, _ in mem_accesses:
+                if inst_idx == protected_idx:
+                    failing_address_vars.update(
+                        getattr(addr_symbol, 'variables', set())
+                    )
+                    break
+
+        candidate_loads = list(pointer_source_loads + address_source_loads)
+        candidate_load_keys = {
+            (entry[3], stable_expr_key(entry[1]))
+            for entry in candidate_loads
+        }
+        for entry in mem_entries:
+            rd_vars = set(getattr(entry[1], 'variables', set()))
+            key = (entry[3], stable_expr_key(entry[1]))
+            if (
+                rd_vars & failing_address_vars
+                and key not in candidate_load_keys
+            ):
+                candidate_loads.append(entry)
+                candidate_load_keys.add(key)
+
         prefix_states = replay_prefix_states(
             reg_values,
             mem_values,
@@ -21742,8 +21884,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             reg_runtime_recipes=reg_runtime_recipes,
             dynamic_mem_inits=dynamic_mem_inits,
         )
-        for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads + address_source_loads:
-            if (load_idx, stable_expr_key(rd_symbol)) in scalar_load_hint_keys:
+        for load_inst, rd_symbol, load_addr_symbol, load_idx in candidate_loads:
+            rd_vars = set(getattr(rd_symbol, 'variables', set()))
+            feeds_failing_address = bool(rd_vars & failing_address_vars)
+            if (
+                (load_idx, stable_expr_key(rd_symbol)) in scalar_load_hint_keys
+                and not feeds_failing_address
+            ):
                 continue
             load_key = (load_idx, str(rd_symbol), str(load_addr_symbol))
             if load_key in seen_loads:
@@ -21755,7 +21902,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 continue
             concrete_load_addr = load_state.solver.eval(getattr(load_state.regs, str(load_inst.rs1))) + load_inst.imm
             concrete_load_offset = (sp_value - concrete_load_addr) & ((1 << 64) - 1)
-            rd_vars = getattr(rd_symbol, 'variables', set())
             min_offset = min_pointer_offset_for_vars(
                 rd_vars,
                 load_idx,
@@ -21765,6 +21911,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 p_idx == load_idx and bool(getattr(p_rd, 'variables', set()) & rd_vars)
                 for _, p_rd, _, p_idx in pointer_source_loads
             ) or load_value_directly_feeds_pointer_access(load_inst, rd_symbol, load_idx)
+            if feeds_failing_address and not failing_address_vars <= rd_vars:
+                pointer_like_load = False
 
             def stored_expr_can_feed_pointer(stored_expr):
                 if not pointer_like_load:
@@ -21892,6 +22040,52 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         reg_runtime_recipes=None,
         dynamic_mem_inits=None,
     ):
+        def translation_covariant_register_constraints(addr_symbol):
+            addr_vars = set(getattr(addr_symbol, 'variables', set()))
+            contributors = [
+                (reg, symbol)
+                for reg, symbol in reg_to_symbol.items()
+                if (
+                    symbol.size() == 64
+                    and (set(getattr(symbol, 'variables', set())) & addr_vars)
+                )
+            ]
+            if not contributors or len(contributors) > 6:
+                return []
+
+            delta = claripy.BVS("rvmca_replay_translation_delta", 64)
+            # A single contributor is already covered by the address range
+            # constraint itself.  Extra anchoring is only needed when two or
+            # more live-ins must translate together through truncation.
+            for group_size in range(2, min(3, len(contributors)) + 1):
+                for group in combinations(contributors, group_size):
+                    replacements = {
+                        symbol.hash(): symbol + delta
+                        for _, symbol in group
+                    }
+                    translated = claripy.replace_dict(
+                        addr_symbol,
+                        replacements,
+                    )
+                    covariance = claripy.simplify(
+                        translated == addr_symbol + delta
+                    )
+                    if not claripy.is_true(covariance):
+                        continue
+
+                    constraints = []
+                    for _, symbol in group:
+                        offset_expr = init_sp - symbol
+                        constraints.extend([
+                            claripy.UGE(offset_expr, claripy.BVV(1, 64)),
+                            claripy.ULE(
+                                offset_expr,
+                                claripy.BVV(STACK_RANGE, 64),
+                            ),
+                        ])
+                    return constraints
+            return []
+
         constraints = []
         prefix_states = replay_prefix_states(
             reg_values,
@@ -21913,10 +22107,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             bad_align = width > 1 and (concrete_addr & (width - 1)) != 0
             if bad_range:
                 offset_expr = init_sp - addr_symbol
-                constraints.extend([
+                range_constraints = [
                     claripy.UGE(offset_expr, claripy.BVV(width, 64)),
                     claripy.ULE(offset_expr, claripy.BVV(STACK_RANGE, 64)),
-                ])
+                ]
+                constraints.extend(range_constraints)
+                constraints.extend(
+                    translation_covariant_register_constraints(addr_symbol)
+                )
             if bad_align:
                 constraints.append((addr_symbol & (width - 1)) == 0)
 
@@ -22020,10 +22218,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if inst_idx != protected_idx:
                         continue
                     offset_expr = init_sp - addr_symbol
-                    constraints.extend([
+                    range_constraints = [
                         claripy.UGE(offset_expr, claripy.BVV(max(width, 1), 64)),
                         claripy.ULE(offset_expr, claripy.BVV(STACK_RANGE, 64)),
-                    ])
+                    ]
+                    constraints.extend(range_constraints)
+                    constraints.extend(
+                        translation_covariant_register_constraints(addr_symbol)
+                    )
                     if width > 1:
                         constraints.append((addr_symbol & (width - 1)) == 0)
 
@@ -22052,6 +22254,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     def find_narrow_pointer_alias_constraints(
         reg_values,
         mem_values,
+        mem_offset_addr_symbols,
+        check_planned_slots=False,
         sp_value=CONCRETE_REPLAY_SP,
         sp_affine_mem_offsets=None,
         reg_runtime_recipes=None,
@@ -22166,7 +22370,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return concrete_addrs[key]
 
         seen = set()
-        used_slots = set()
+        used_slots = set(mem_values)
         for load_inst, addr_symbol, load_idx in [
             (entry[0], entry[2], entry[3])
             for entry in mem_entries
@@ -22175,6 +22379,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if concrete_addr is None:
                 continue
             used_slots.add(((sp_value - concrete_addr) + 7) & ~7)
+
+        planned_slots_by_addr = {}
+        if check_planned_slots:
+            for slot_offset, addr_symbols in mem_offset_addr_symbols.items():
+                for addr_symbol in addr_symbols:
+                    planned_slots_by_addr.setdefault(
+                        stable_expr_key(addr_symbol),
+                        set(),
+                    ).add(slot_offset)
 
         def next_unused_slot(exclude_slot):
             offset = INIT_ACCESS_ALIGN
@@ -22186,22 +22399,37 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         for pointer_inst, pointer_addr_symbol, pointer_idx in pointer_loads:
             pointer_addr = concrete_load_addr(pointer_inst, pointer_addr_symbol, pointer_idx)
-            if pointer_addr is None:
+            planned_pointer_slots = planned_slots_by_addr.get(
+                stable_expr_key(pointer_addr_symbol),
+                set(),
+            )
+            if pointer_addr is None and not planned_pointer_slots:
                 continue
-            pointer_slot = ((sp_value - pointer_addr) + 7) & ~7
+            actual_pointer_slot = (
+                ((sp_value - pointer_addr) + 7) & ~7
+                if pointer_addr is not None
+                else None
+            )
             for scalar_inst, scalar_addr_symbol, scalar_idx in scalar_loads:
                 scalar_addr = concrete_load_addr(scalar_inst, scalar_addr_symbol, scalar_idx)
                 if scalar_addr is None:
                     continue
                 scalar_slot = ((sp_value - scalar_addr) + 7) & ~7
-                if pointer_slot != scalar_slot:
+                colliding_pointer_slots = {
+                    pointer_slot
+                    for pointer_slot in planned_pointer_slots
+                    if pointer_slot == scalar_slot
+                }
+                if actual_pointer_slot == scalar_slot:
+                    colliding_pointer_slots.add(actual_pointer_slot)
+                if not colliding_pointer_slots:
                     continue
                 key = (pointer_idx, scalar_idx)
                 if key in seen:
                     continue
                 seen.add(key)
                 constraints.append(symbolic_init_slots_no_overlap(pointer_addr_symbol, scalar_addr_symbol))
-                target_slot = next_unused_slot(pointer_slot)
+                target_slot = next_unused_slot(min(colliding_pointer_slots))
                 if target_slot is not None:
                     constraints.append(
                         (init_sp - scalar_addr_symbol) == claripy.BVV(target_slot, 64)
@@ -22373,6 +22601,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             pp_alias_constraints = find_narrow_pointer_alias_constraints(
                 reg_values,
                 mem_values,
+                mem_offset_addr_symbols,
                 sp_value=CONCRETE_REPLAY_SP,
                 sp_affine_mem_offsets=sp_affine_mem_offsets,
                 reg_runtime_recipes=reg_runtime_recipes,
@@ -22447,6 +22676,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         alias_constraints.extend(find_narrow_pointer_alias_constraints(
             reg_values,
             mem_values,
+            mem_offset_addr_symbols,
+            check_planned_slots=True,
             sp_value=failed_replay_sp,
             sp_affine_mem_offsets=sp_affine_mem_offsets,
             reg_runtime_recipes=reg_runtime_recipes,
