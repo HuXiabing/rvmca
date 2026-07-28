@@ -1,0 +1,80 @@
+import json
+import subprocess
+from pathlib import Path
+
+from rvmca.config import OUTPUT_PATH, TOOLS_PATH
+from rvmca.trans.prof import transform_for_profiling
+
+
+def test_self_updated_source_load_base_is_not_zeroed(tmp_path):
+    asm_path = tmp_path / "self_updated_source_load_base.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a3,0(s9)",
+                "add a5,a5,s0",
+                "ld a4,0(a5)",
+                "ld a5,376(s2)",
+                "add a3,a3,s0",
+                "ld a3,0(a3)",
+                "add a4,a4,s6",
+                "add a5,a5,s6",
+                "lw a4,0(a4)",
+                "lw a5,0(a5)",
+                "lw a6,4(a3)",
+                "ld a7,32(sp)",
+                "addw a5,a5,a4",
+                "addw a6,a6,a5",
+                "ld a5,56(sp)",
+                "ld a4,48(sp)",
+                "sd s3,24(sp)",
+                "subw a6,a6,a5",
+                "ld a5,64(sp)",
+                "sd s4,0(sp)",
+                "addi a3,zero,7",
+                "sd a5,16(sp)",
+                "ld a5,40(sp)",
+                "addi a1,a4,0",
+                "addi a0,zero,1",
+                "sd a5,8(sp)",
+                "addi a5,zero,0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    for path in generated_paths:
+        path.unlink(missing_ok=True)
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)

@@ -518,3 +518,129 @@ same three null fields. The exact original labels for those five cases are
 therefore not recoverable from the final output. Later transition reports must
 list this ambiguity separately and must not count a mere failed/timeout label
 change as a repair.
+
+## Expanded Original Failed-to-PASS Gate
+
+The final profiler for this repair round has SHA-256:
+
+```text
+7b1e41d341d23428ff6a664d66ef34d76aa3d0588faaeb6b92acb305625e8e4d
+```
+
+The round adds general repairs for the following structural failure patterns:
+
+- a concrete candidate that raises `ClaripyZeroDivisionError` now falls back to
+  solver selection instead of aborting the candidate search;
+- a register used as the base of a source load is not incorrectly zeroed as an
+  independent additive residual;
+- shifted-difference addresses can use a proven runtime-SP scaled-quotient
+  recipe;
+- affine quotient synthesis supports large constant-multiply carriers and two
+  independent carriers while retaining the legacy large-power-of-two path; and
+- repeated pointer loads may share an initial-memory slot only when their widths
+  match, the solver proves their addresses equal, and every intervening store is
+  proven not to clobber any byte of the load.
+
+The fixed 1,430-ID benefit gate completed with:
+
+```text
+original failed -> PASS  1430
+original failed -> SKIP     0
+original failed -> FAIL     0
+original failed -> TIMEOUT  0
+```
+
+Its report is
+`tests/failure_reports/stable1430_after_legacy_alias_fix/status.json`, and its
+recorded profiler hash is identical to the hash above. The input set is
+`tests/failure_reports/id_sets/spec06_stable_failed_to_pass_1430.ids`.
+
+Three additional blocks from the frozen original-failed population passed three
+consecutive checks with the same profiler:
+
+```text
+400.perlbench_14923
+458.sjeng_918
+458.sjeng_925
+```
+
+They are recorded in
+`tests/failure_reports/id_sets/spec06_stable_failed_to_pass_delta_3.ids`.
+Together, the two disjoint ID sets establish a stable lower bound of:
+
+```text
+original failed -> PASS  1433 / 2375
+```
+
+Changing an outcome from failed to SKIP is not included in this count.
+
+## Pointer-Slot Alias Regression and Repair
+
+The first strict pointer-slot alias repair caused three historical PASS blocks
+to regress:
+
+```text
+403.gcc_23021
+403.gcc_25040
+403.gcc_61016
+```
+
+Their common pattern reloads a pointer from the same `gp`-relative slot. The
+affine-group availability check treated the later legal reuse as a conflicting
+slot even though both loads represented the same memory value.
+
+The corrected rule is conservative. Slot reuse is accepted only for same-width
+loads whose address equality is solver-proven. For every store between the two
+loads, byte-level non-alias constraints cover the full load and store widths.
+The candidate address constraint and all no-clobber constraints are committed
+atomically; an exception, timeout, or UNSAT result rejects reuse. The rule works
+whether the current load reuses an earlier load or a later load reuses the
+current one. Alternate-SP replay and QEMU/pp validation remain unchanged.
+
+Validation with the final profiler:
+
+```text
+historical pointer regression gate        3 / 3 PASS
+pointer failed-to-PASS gate, round 1     14 / 14 PASS
+pointer failed-to-PASS gate, round 2     14 / 14 PASS
+combined failed-to-PASS gate           1430 / 1430 PASS
+```
+
+The production regression test is
+`tests/test_prof_pointer_slot_alias.py`; both structural cases require the
+generated program to finish a real QEMU/pp run and print `cycles:`.
+
+## Final Exact Historical PASS Reconciliation
+
+The exact 2,021 historical PASS-ID batch used the final profiler above, two
+workers, and a 300-second block budget. It completed in 6,363.7 seconds:
+
+```text
+PASS       2020
+TIMEOUT       1
+FAIL          0
+SKIP          0
+```
+
+The only batch timeout was the previously documented budget-sensitive block
+`456.hmmer_402`, at `init:materialize_init:register`. With the same profiler,
+one worker, and a 600-second budget, it completed the full transform, replay,
+assembly, and QEMU/pp path as PASS in 306.4 seconds.
+
+The reports are:
+
+```text
+tests/failure_reports/legacy2021_after_pointer_alias_reuse_fix.json
+tests/failure_reports/legacy_hmmer_402_after_pointer_alias_reuse_fix.json
+```
+
+Exact-ID reconciliation is therefore:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+regressed                         0
+```
+
+This satisfies the hard no-regression condition for the 1,433-block stable
+failed-to-PASS lower bound.

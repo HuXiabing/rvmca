@@ -85,7 +85,8 @@ LOAD_SLOT_PRUNE_THRESHOLD = 64
 HEURISTIC_SOLVER_TIMEOUT_MS = 500
 ENABLE_POINTER_LOAD_ANCHORS = False
 RUNTIME_SP_ALIGNMENT = 16
-MAX_AFFINE_QUOTIENT_SCALE = 256
+MAX_AFFINE_QUOTIENT_SCALE = STACK_RANGE
+MAX_LEGACY_POWER_OF_TWO_AFFINE_SCALE = 256
 
 
 def _scaled_stack_transform_for_value(
@@ -141,6 +142,44 @@ def _affine_quotient_value(sp_value: int, recipe) -> int:
     if scale <= 1:
         raise ValueError(f"invalid affine quotient scale: {scale}")
     return ((sp_value - offset) & ((1 << 64) - 1)) // scale
+
+
+def _runtime_reg_recipe_value(sp_value: int, recipe) -> int:
+    """Evaluate a proven runtime-SP register materialization recipe."""
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 3
+        and recipe[0] == 'affine_quotient'
+    ):
+        return _affine_quotient_value(sp_value, recipe)
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 4
+        and recipe[0] == 'affine_scaled_quotient'
+    ):
+        _, offset, divisor, multiplier = recipe
+        if divisor <= 0 or multiplier <= 0:
+            raise ValueError(f"invalid affine scaled quotient recipe: {recipe!r}")
+        quotient = (
+            (sp_value - int(offset)) & ((1 << 64) - 1)
+        ) // int(divisor)
+        return (quotient * int(multiplier)) & ((1 << 64) - 1)
+    raise ValueError(f"invalid runtime register recipe: {recipe!r}")
+
+
+def _runtime_recipe_address(sp_value: int, recipe, addr_const: int) -> int:
+    """Evaluate the address driven by a quotient-based register recipe."""
+    if not isinstance(recipe, (tuple, list)) or len(recipe) not in {3, 4}:
+        raise ValueError(f"invalid runtime address recipe: {recipe!r}")
+    if recipe[0] not in {'affine_quotient', 'affine_scaled_quotient'}:
+        raise ValueError(f"invalid runtime address recipe: {recipe!r}")
+    _, offset, divisor, *_ = recipe
+    if divisor <= 0:
+        raise ValueError(f"invalid runtime address divisor: {divisor}")
+    quotient = (
+        (sp_value - int(offset)) & ((1 << 64) - 1)
+    ) // int(divisor)
+    return (quotient * int(divisor) + int(addr_const)) & ((1 << 64) - 1)
 
 
 def _affine_quotient_remainders(
@@ -947,7 +986,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     def runtime_reg_value(reg, value, sp_value, reg_runtime_recipes=None):
         recipe = (reg_runtime_recipes or {}).get(reg)
         if recipe is not None:
-            return _affine_quotient_value(sp_value, recipe)
+            return _runtime_reg_recipe_value(sp_value, recipe)
         return remap_sp_relative_value(
             value,
             CONCRETE_REPLAY_SP,
@@ -957,8 +996,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
     def runtime_dynamic_mem_addr(sp_value, entry):
         recipe, addr_const, _, _, _ = entry
-        quotient = _affine_quotient_value(sp_value, recipe)
-        return (quotient * int(recipe[2]) + int(addr_const)) & ((1 << 64) - 1)
+        return _runtime_recipe_address(sp_value, recipe, addr_const)
 
     def runtime_dynamic_mem_value(sp_value, entry):
         _, _, _, raw_value, value_recipe = entry
@@ -4213,12 +4251,25 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 cache[cache_key] = result
                 return result
 
-            substituted = substitute(expr)
-            if expr_vars(substituted):
+            try:
+                substituted = substitute(expr)
+                if expr_vars(substituted):
+                    return None
+                return concrete_expr_value(claripy.simplify(substituted))
+            except claripy.errors.ClaripyZeroDivisionError:
                 return None
-            return concrete_expr_value(claripy.simplify(substituted))
 
-        def choose_value(expr, preferred=None, positive=False, align=None, avoid=None, width=8, required=True, fast_positive=False):
+        def choose_value(
+            expr,
+            preferred=None,
+            positive=False,
+            align=None,
+            avoid=None,
+            width=8,
+            required=True,
+            fast_positive=False,
+            candidate_ok=None,
+        ):
             avoid = [] if avoid is None else avoid
             step = align if align else 1
             complex_memory_block = len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
@@ -4226,6 +4277,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             value_related_timeout_ms = 500 if complex_memory_block else 5000
 
             def concrete_value_ok(val):
+                if candidate_ok is not None and not candidate_ok(val):
+                    return False
                 if positive and val <= 0:
                     return False
                 if align and val % align != 0:
@@ -6157,15 +6210,36 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             allow_scaled_stack=False,
         ):
             if force_affine_quotient is not None:
-                _, offset, scale = force_affine_quotient
+                recipe_kind = force_affine_quotient[0]
+                if recipe_kind == 'affine_quotient':
+                    _, offset, divisor = force_affine_quotient
+                    multiplier = 1
+                elif recipe_kind == 'affine_scaled_quotient':
+                    _, offset, divisor, multiplier = force_affine_quotient
+                else:
+                    raise ValueError(
+                        f"invalid runtime register recipe: {force_affine_quotient!r}"
+                    )
                 scratch = TEMP_REG2 if reg_name != TEMP_REG2 else TEMP_REG
                 insts.append(UFmtInst('li', reg_name, abs(offset)))
                 if offset >= 0:
                     insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
                 else:
                     insts.append(RFmtInst('add', reg_name, 'sp', reg_name))
-                insts.append(UFmtInst('li', scratch, scale))
-                insts.append(RFmtInst('divu', reg_name, reg_name, scratch))
+                if divisor > 1:
+                    insts.append(UFmtInst('li', scratch, divisor))
+                    insts.append(RFmtInst('divu', reg_name, reg_name, scratch))
+                if multiplier > 1:
+                    if not (multiplier & (multiplier - 1)):
+                        insts.append(IFmtInst(
+                            'slli',
+                            reg_name,
+                            reg_name,
+                            multiplier.bit_length() - 1,
+                        ))
+                    else:
+                        insts.append(UFmtInst('li', scratch, multiplier))
+                        insts.append(RFmtInst('mul', reg_name, reg_name, scratch))
                 return
             if force_scaled_stack is not None:
                 offset, shift = force_scaled_stack
@@ -6703,12 +6777,25 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if not matched_representative:
                     representatives.append((inst, rd_symbol, addr_symbol, inst_idx))
 
+        def reg_is_source_load_base(reg):
+            symbol = reg_to_symbol.get(reg)
+            if symbol is None:
+                return False
+            symbol_vars = expr_vars(symbol)
+            return bool(symbol_vars) and any(
+                getattr(load_inst, 'rs1', None) == reg
+                and (expr_vars(load_addr_symbol) & symbol_vars)
+                for load_inst, _, load_addr_symbol, _ in address_source_loads
+            )
+
         def reg_is_additive_offset_to_independent_base(reg):
             symbol = reg_to_symbol.get(reg)
             if symbol is None:
                 return False
             symbol_vars = expr_vars(symbol)
             if not symbol_vars:
+                return False
+            if reg_is_source_load_base(reg):
                 return False
             address_uses = [
                 addr_symbol
@@ -7793,6 +7880,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 reg: expr_vars(symbol)
                 for reg, symbol in reg_to_symbol.items()
             }
+            source_load_base_vars = set()
+            for source_reg, source_vars in register_vars_by_reg.items():
+                if reg_is_source_load_base(source_reg):
+                    source_load_base_vars.update(source_vars)
             for reg, symbol in reg_to_symbol.items():
                 if reg_is_additive_offset_to_independent_base(reg):
                     continue
@@ -7805,6 +7896,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     residual = claripy.simplify(addr_symbol - symbol)
                     residual_vars = expr_vars(residual)
                     if not residual_vars or (residual_vars & symbol_vars):
+                        continue
+                    if residual_vars & source_load_base_vars:
                         continue
                     target_candidates = list(small_targets)
                     residual_affine = affine_base_const(residual)
@@ -10026,7 +10119,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return value
             return None
 
-        def scaled_symbol_affine(expr, symbol):
+        def scaled_symbol_affine(expr, symbol, min_scale=2):
             symbol_key = expr_key(symbol)
             symbol_vars = expr_vars(symbol)
             mask = (1 << 64) - 1
@@ -10114,7 +10207,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if parsed is None:
                 return None
             scale, const, constraints = parsed
-            if scale <= 1 or scale > MAX_AFFINE_QUOTIENT_SCALE:
+            if scale < min_scale or scale > MAX_AFFINE_QUOTIENT_SCALE:
+                return None
+            if (
+                scale > MAX_LEGACY_POWER_OF_TWO_AFFINE_SCALE
+                and not (scale & (scale - 1))
+            ):
                 return None
             return scale, const & mask, constraints
 
@@ -10205,11 +10303,221 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return residual_value & ((1 << 64) - 1), carrier_constraints
                 return None
 
+            def shifted_carrier_affine(addr_symbol):
+                for shift_node in iter_ast_nodes(addr_symbol):
+                    if getattr(shift_node, 'op', None) not in {
+                        '__rshift__', 'LShR', 'SShR',
+                    }:
+                        continue
+                    shift_args = getattr(shift_node, 'args', ())
+                    if len(shift_args) != 2:
+                        continue
+                    child, shift_arg = shift_args
+                    if not (expr_vars(child) & symbol_vars):
+                        continue
+                    shift = (
+                        shift_arg
+                        if isinstance(shift_arg, int)
+                        else concrete_expr_value(shift_arg)
+                    )
+                    if shift is None or shift <= 0 or shift > 8:
+                        continue
+                    carrier_constraints = constraints_to_carrier(child, symbol)
+                    if carrier_constraints is None:
+                        continue
+                    outer = scaled_symbol_affine(
+                        addr_symbol,
+                        shift_node,
+                        min_scale=1,
+                    )
+                    if outer is None:
+                        continue
+                    divisor, const, outer_constraints = outer
+                    if divisor <= 0:
+                        continue
+                    return (
+                        divisor,
+                        const,
+                        1 << shift,
+                        list(carrier_constraints) + list(outer_constraints),
+                    )
+                return None
+
+            def add_shifted_carrier_candidates(addr_symbol, width):
+                initial_candidate_count = len(candidates)
+                shifted = shifted_carrier_affine(addr_symbol)
+                if shifted is None:
+                    return False
+                divisor, const, multiplier, shifted_constraints = shifted
+                runtime_accesses = []
+                runtime_recipe_eligible = (
+                    find_reg_by_name(TEMP_REG) not in regs_undefined
+                    and find_reg_by_name(TEMP_REG2) not in regs_undefined
+                )
+                group_requirements = []
+                for other_inst, other_addr_symbol, other_idx, other_width in mem_accesses:
+                    if not (expr_vars(other_addr_symbol) & symbol_vars):
+                        continue
+                    other_shifted = shifted_carrier_affine(other_addr_symbol)
+                    if other_shifted is None:
+                        runtime_recipe_eligible = False
+                        continue
+                    (
+                        other_divisor,
+                        other_const,
+                        other_multiplier,
+                        other_constraints,
+                    ) = other_shifted
+                    if (
+                        other_divisor != divisor
+                        or other_multiplier != multiplier
+                    ):
+                        runtime_recipe_eligible = False
+                        continue
+                    runtime_accesses.append((
+                        other_idx,
+                        _signed_u64(other_const),
+                        other_width,
+                        other_inst.type == IType.Load,
+                    ))
+                    delta = _signed_u64(
+                        (const - other_const) & ((1 << 64) - 1)
+                    )
+                    group_requirements.append((
+                        other_addr_symbol,
+                        delta,
+                        other_width,
+                        other_constraints,
+                    ))
+                if not runtime_recipe_eligible or not runtime_accesses:
+                    return False
+
+                align = width if width > 1 else 1
+                starts = [align, INIT_PTR_MIN_OFFSET]
+                preferred = next_free_stack_offset(
+                    used_stack_offsets,
+                    align=align,
+                    width=INIT_ACCESS_SLOT_WIDTH,
+                    start=align,
+                )
+                if preferred is not None:
+                    starts.insert(0, preferred)
+                known_access_offset = addr_expr_offsets.get(expr_key(addr_symbol))
+                if known_access_offset is not None:
+                    starts.insert(0, known_access_offset)
+                starts.extend(
+                    used + max(width, used_width)
+                    for used, used_width in used_stack_offsets
+                )
+                seen_offsets = set()
+                for start in starts:
+                    start = _align_up(max(1, start), align)
+                    for access_offset in range(
+                        start,
+                        min(STACK_RANGE, start + 512) + 1,
+                        align,
+                    ):
+                        if access_offset in seen_offsets:
+                            continue
+                        seen_offsets.add(access_offset)
+                        if any(
+                            concrete_ranges_overlap(
+                                access_offset,
+                                INIT_ACCESS_SLOT_WIDTH,
+                                used_offset,
+                                used_width,
+                            )
+                            for used_offset, used_width in used_stack_offsets
+                        ):
+                            continue
+                        group_targets = []
+                        group_constraints = list(shifted_constraints)
+                        group_ok = True
+                        for (
+                            other_addr_symbol,
+                            delta,
+                            other_width,
+                            other_constraints,
+                        ) in group_requirements:
+                            other_offset = access_offset + delta
+                            if (
+                                other_offset <= 0
+                                or other_offset > STACK_RANGE
+                                or (
+                                    other_width > 1
+                                    and other_offset % other_width
+                                )
+                            ):
+                                group_ok = False
+                                break
+                            group_targets.append((
+                                other_addr_symbol,
+                                concrete_stack_addr(other_offset),
+                            ))
+                            group_constraints.extend(other_constraints)
+                        if not group_ok:
+                            continue
+
+                        target_addr = concrete_stack_addr(access_offset)
+                        raw_value = (target_addr - const) & ((1 << 64) - 1)
+                        if raw_value % divisor:
+                            continue
+                        value = (
+                            (raw_value // divisor) * multiplier
+                        ) & ((1 << 64) - 1)
+                        numerator_offset = access_offset + _signed_u64(const)
+                        remainders = _affine_quotient_remainders(
+                            numerator_offset,
+                            divisor,
+                        )
+                        if not remainders:
+                            continue
+                        runtime_safe = True
+                        for _, other_const, other_width, _ in runtime_accesses:
+                            base_offset = numerator_offset - other_const
+                            for remainder in remainders:
+                                actual_offset = base_offset + remainder
+                                if (
+                                    actual_offset < max(1, other_width)
+                                    or actual_offset > STACK_RANGE
+                                    or (
+                                        other_width > 1
+                                        and actual_offset % other_width
+                                    )
+                                ):
+                                    runtime_safe = False
+                                    break
+                            if not runtime_safe:
+                                break
+                        if not runtime_safe:
+                            continue
+                        candidates.append((
+                            value,
+                            addr_symbol,
+                            target_addr,
+                            access_offset,
+                            group_constraints,
+                            group_targets,
+                            {
+                                'recipe': (
+                                    'affine_scaled_quotient',
+                                    numerator_offset,
+                                    divisor,
+                                    multiplier,
+                                ),
+                                'accesses': tuple(runtime_accesses),
+                                'remainders': remainders,
+                            },
+                        ))
+                return len(candidates) > initial_candidate_count
+
             for inst, addr_symbol, _, width in mem_accesses:
                 if not (expr_vars(addr_symbol) & symbol_vars):
                     continue
                 scaled = scaled_symbol_affine(addr_symbol, symbol)
                 if scaled is None:
+                    if add_shifted_carrier_candidates(addr_symbol, width):
+                        continue
                     mul_carrier = mul_carrier_affine(addr_symbol)
                     if mul_carrier is not None:
                         residual_value, carrier_constraints = mul_carrier
@@ -12738,9 +13046,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             if (
                                 related_slot_offset == used_offset
                                 and related_slot_width == used_width
-                                and (
-                                    related_inst.type != IType.Store
-                                    or used_slot_aliases_related_access(used_offset, related_addr_symbol)
+                                and used_slot_aliases_related_access(
+                                    used_offset,
+                                    related_addr_symbol,
                                 )
                             ):
                                 continue
@@ -14337,7 +14645,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if not exprs_may_be_related(related_addr_symbol, used_addr_symbol):
                         return False
                     test_solver = candidate_solver.branch()
-                    test_solver.timeout = 50 if long_block else max(related_candidate_timeout_ms, 1000)
+                    test_solver.timeout = max(related_candidate_timeout_ms, 1000)
                     try:
                         test_solver.add((init_sp - rd_symbol) == pointer_offset)
                         test_solver.add((init_sp - related_addr_symbol) == related_offset)
@@ -14354,7 +14662,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if not exprs_may_be_related(related_addr_symbol, existing_addr_symbol):
                         return False
                     test_solver = candidate_solver.branch()
-                    test_solver.timeout = 50 if long_block else max(related_candidate_timeout_ms, 1000)
+                    test_solver.timeout = max(related_candidate_timeout_ms, 1000)
                     try:
                         for constraint in candidate_constraints:
                             test_solver.add(constraint)
@@ -14401,29 +14709,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 break
                         if same_existing_access:
                             continue
-                        if (
-                            related_slot_width == 8
-                            and used_width == 8
-                            and access_offset == used_offset
-                        ):
-                            used_word_offset = ((used_offset + 7) // 8) * 8
-                            used_slot = mem_slot_symbols.get(used_word_offset)
-                            has_existing_pointer_access = any(
-                                existing_addr == used_offset
-                                and existing_width == used_width
-                                for existing_addr, existing_width, _ in access_ranges
-                            )
-                            if (
-                                has_existing_pointer_access
-                                and used_slot is not None
-                                and not used_slot.get('scalar_zero')
-                                and (
-                                    used_slot.get('pointer_like')
-                                    or used_slot.get('must_be_pointer')
-                                    or used_slot.get('sp_affine')
-                                )
-                            ):
-                                continue
                         debug_pointer_choice(
                             "reject_derived_avoid_overlap",
                             pointer_offset=pointer_offset,
@@ -14639,24 +14924,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 related_addr_symbol,
                                 used_addr_symbol,
                                 access_offset,
-                            )
-                        ):
-                            continue
-                        if (
-                            related_width == 8
-                            and used_width == 8
-                            and access_offset == used_addr
-                            and used_slot is not None
-                            and not used_slot.get('scalar_zero')
-                            and (
-                                used_slot.get('pointer_like')
-                                or used_slot.get('must_be_pointer')
-                                or used_slot.get('sp_affine')
-                            )
-                            and any(
-                                existing_addr == used_addr
-                                and existing_width == used_width
-                                for existing_addr, existing_width, _ in access_ranges
                             )
                         ):
                             continue
@@ -15216,7 +15483,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             if not exprs_may_be_related(addr_symbol, other_addr_symbol):
                                 return False
                             test_solver = candidate_solver.branch()
-                            test_solver.timeout = 50 if long_block else max(related_candidate_timeout_ms, 1000)
+                            test_solver.timeout = max(related_candidate_timeout_ms, 1000)
                             try:
                                 for constraint in candidate_constraints:
                                     test_solver.add(constraint)
@@ -15232,7 +15499,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 if not exprs_may_be_related(addr_symbol, store_addr_symbol):
                                     continue
                                 test_solver = candidate_solver.branch()
-                                test_solver.timeout = 50 if long_block else max(related_candidate_timeout_ms, 1000)
+                                test_solver.timeout = max(related_candidate_timeout_ms, 1000)
                                 try:
                                     for constraint in candidate_constraints:
                                         test_solver.add(constraint)
@@ -15313,42 +15580,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         candidate_constraints=None,
                         record=True,
                     ):
-                        try:
-                            current_is_pointer_like = bool(current_pointer_like_load)
-                        except NameError:
-                            current_is_pointer_like = False
-                        if not current_is_pointer_like or width != 8:
+                        if candidate_constraints is None:
                             return False
-                        pointer_offset = access_offset + imm
-                        if pointer_offset not in current_base_offsets:
-                            return False
-                        for used, used_width in overlap_ranges:
-                            if used != access_offset or used_width != width:
-                                return False
-                            used_word_offset = ((used + 7) // 8) * 8
-                            used_slot = mem_slot_symbols.get(used_word_offset)
-                            has_existing_pointer_access = any(
-                                existing_addr == used
-                                and existing_width == used_width
-                                for existing_addr, existing_width, _ in access_ranges
-                            )
-                            if not (
-                                has_existing_pointer_access
-                                and used_slot is not None
-                                and not used_slot.get('scalar_zero')
-                                and (
-                                    used_slot.get('pointer_like')
-                                    or used_slot.get('must_be_pointer')
-                                    or used_slot.get('sp_affine')
-                                )
-                            ):
-                                return False
-                        if (
-                            candidate_constraints is not None
-                            and not add_existing_slot_value_constraints(
-                                access_offset,
-                                candidate_constraints,
-                            )
+                        if not overlap_is_forced_same_pointer_load(
+                            access_offset,
+                            overlap_ranges,
+                            candidate_constraints,
                         ):
                             return False
                         if record:
@@ -17868,7 +18105,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             runtime_recipe = None
             if runtime_info is not None:
                 candidate_recipe = runtime_info['recipe']
-                if _affine_quotient_value(CONCRETE_REPLAY_SP, candidate_recipe) == val:
+                if _runtime_reg_recipe_value(CONCRETE_REPLAY_SP, candidate_recipe) == val:
                     runtime_recipe = candidate_recipe
                     reg_runtime_recipes[r] = candidate_recipe
                     reg_runtime_accesses[r] = runtime_info['accesses']
@@ -17925,7 +18162,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     recipe = reg_runtime_recipes.get(reg)
                     if (
                         recipe is not None
-                        and _affine_quotient_value(CONCRETE_REPLAY_SP, recipe) != new_value
+                        and _runtime_reg_recipe_value(CONCRETE_REPLAY_SP, recipe) != new_value
                     ):
                         reg_runtime_recipes.pop(reg, None)
                         reg_runtime_accesses.pop(reg, None)
@@ -18409,6 +18646,22 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def load_slot_priority(entry):
             inst, rd_symbol, addr_symbol, inst_idx = entry
+            concrete_addr = concrete_value_from_materialized(addr_symbol)
+            if concrete_addr is not None:
+                concrete_offset = stack_offset_for_value(concrete_addr)
+                rd_vars = expr_vars(rd_symbol)
+                value_feeds_later_address = bool(rd_vars) and any(
+                    later_idx > inst_idx
+                    and (expr_vars(later_addr_symbol) & rd_vars)
+                    for _, later_addr_symbol, later_idx, _ in mem_accesses
+                )
+                if (
+                    concrete_offset is not None
+                    and 0 < concrete_offset <= STACK_RANGE
+                    and (inst.width <= 1 or concrete_offset % inst.width == 0)
+                    and value_feeds_later_address
+                ):
+                    return -3
             if inst.width < 8 and is_scalar_zero_address_load(inst, rd_symbol, inst_idx):
                 return 0
             if load_slot_entry_pointer_like(entry):
@@ -19328,7 +19581,60 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         return True
                 return False
 
-            def candidate_keeps_affine_group_available(candidate_offset):
+            def future_load_slot_reuse_constraints(
+                candidate_offset,
+                related_addr_symbol,
+                related_idx,
+                related_width,
+            ):
+                if (
+                    related_idx == inst_idx
+                    or related_idx not in load_entries_by_idx
+                    or related_width != inst.width
+                    or not same_address_for_slot_reuse(
+                        addr_symbol,
+                        related_addr_symbol,
+                        timeout_ms=1000,
+                    )
+                ):
+                    return None
+
+                candidate_constraint = addr_expr == expr_bvv(
+                    candidate_offset,
+                    addr_expr,
+                )
+                no_clobber_constraints = []
+                first_idx = min(inst_idx, related_idx)
+                last_idx = max(inst_idx, related_idx)
+                for _, store_addr_symbol, store_idx, store_width, _ in store_accesses:
+                    if not (first_idx < store_idx < last_idx):
+                        continue
+                    byte_aliases = [
+                        addr_symbol + load_byte == store_addr_symbol + store_byte
+                        for load_byte in range(access_width)
+                        for store_byte in range(store_width)
+                    ]
+                    if not byte_aliases:
+                        continue
+                    no_clobber_constraints.append(
+                        claripy.Not(claripy.Or(*byte_aliases))
+                    )
+                test_solver = candidate_solver.branch()
+                test_solver.timeout = 1000
+                try:
+                    test_solver.add(candidate_constraint)
+                    for constraint in no_clobber_constraints:
+                        test_solver.add(constraint)
+                    if not test_solver.satisfiable():
+                        return None
+                except Exception:
+                    return None
+                return no_clobber_constraints
+
+            def candidate_keeps_affine_group_available(
+                candidate_offset,
+                slot_reuse_constraints,
+            ):
                 if not (current_scalar_zero_load or current_pointer_like_load):
                     return True
                 current_affine = affine_key(addr_symbol)
@@ -19377,6 +19683,24 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             related=str(related_addr_symbol),
                         )
                         return False
+                    reuse_constraints = future_load_slot_reuse_constraints(
+                        candidate_offset,
+                        related_addr_symbol,
+                        related_idx,
+                        related_width,
+                    )
+                    if reuse_constraints is not None:
+                        known_constraints = {
+                            str(claripy.simplify(constraint))
+                            for constraint in slot_reuse_constraints
+                        }
+                        for constraint in reuse_constraints:
+                            constraint_key = str(claripy.simplify(constraint))
+                            if constraint_key in known_constraints:
+                                continue
+                            known_constraints.add(constraint_key)
+                            slot_reuse_constraints.append(constraint)
+                        continue
                     related_scalar_zero = related_load_is_scalar_zero(related_idx)
                     related_entry = load_entries_by_idx.get(related_idx)
                     related_pointer_like = (
@@ -19592,13 +19916,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if hard_slot_type_load and existing_slot_conflicts_with_current(addr):
                     debug_load_slot_choice("reject_slot_conflict", candidate_offset=addr)
                     return False
-                if not candidate_keeps_affine_group_available(addr):
+                slot_reuse_constraints = []
+                if not candidate_keeps_affine_group_available(
+                    addr,
+                    slot_reuse_constraints,
+                ):
                     return False
                 constraint = addr_expr == claripy.BVV(
                     addr & ((1 << addr_expr.size()) - 1),
                     addr_expr.size(),
                 )
-                commit_constraints = [constraint]
+                commit_constraints = [constraint] + slot_reuse_constraints
                 slot_value_equalities = []
                 word_offset = ((addr + 7) // 8) * 8
                 byte_offset = word_offset - addr
@@ -19719,7 +20047,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 pass
             else:
                 prefer_pointer_load_addr_solver = addr_has_loaded_base_with_residual_scalar(addr_symbol)
-                if hard_slot_type_load and not prefer_pointer_load_addr_solver:
+                if hard_slot_type_load:
                     forced_offset = concrete_stack_offset_for_addr_expr(addr_symbol)
                     if (
                         forced_offset is not None
@@ -19757,6 +20085,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     used_width,
                                 )
                                 for used_addr, used_width, _ in access_ranges
+                            ):
+                                continue
+                            if (
+                                current_pointer_like_load
+                                and not current_addr_aliases_used_offset(eval_offset)
                             ):
                                 continue
                             if commit_load_addr_constraint(eval_offset, timeout_ms=1000):
@@ -20148,6 +20481,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 width=access_width,
                                 required=False,
                                 fast_positive=True,
+                                candidate_ok=lambda candidate: (
+                                    fixed_sp_affine_quotient_compatible(
+                                        addr_symbol,
+                                        candidate,
+                                    )
+                                ),
                             )
                         except AssertionError:
                             addr = None
@@ -20173,6 +20512,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     width=access_width,
                                     required=False,
                                     fast_positive=True,
+                                    candidate_ok=lambda candidate: (
+                                        fixed_sp_affine_quotient_compatible(
+                                            addr_symbol,
+                                            candidate,
+                                        )
+                                    ),
                                 )
                             except AssertionError:
                                 addr = None
@@ -20210,6 +20555,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             width=access_width,
                             required=False,
                             fast_positive=True,
+                            candidate_ok=lambda candidate: (
+                                fixed_sp_affine_quotient_compatible(
+                                    addr_symbol,
+                                    candidate,
+                                )
+                            ),
                         )
                     if addr is None and not hard_slot_type_load:
                         try:
@@ -20227,6 +20578,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 width=access_width,
                                 required=not (len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD),
                                 fast_positive=True,
+                                candidate_ok=lambda candidate: (
+                                    fixed_sp_affine_quotient_compatible(
+                                        addr_symbol,
+                                        candidate,
+                                    )
+                                ),
                             )
                             if (
                                 addr is None
@@ -21192,11 +21549,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 seen_dynamic_mem_inits.add(entry)
                 dynamic_mem_inits.append(entry)
 
+                address_recipe = (
+                    'affine_quotient',
+                    recipe[1],
+                    recipe[2],
+                )
                 append_value_init(
                     candidate_init,
                     TEMP_REG,
                     0,
-                    force_affine_quotient=recipe,
+                    force_affine_quotient=address_recipe,
                 )
                 candidate_init.append(
                     RFmtInst('mul', TEMP_REG, TEMP_REG, TEMP_REG2)

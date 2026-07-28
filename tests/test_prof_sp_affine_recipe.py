@@ -463,3 +463,183 @@ def test_affine_quotient_handles_add_before_power_of_two_scale(tmp_path):
     finally:
         for path in generated_paths:
             path.unlink(missing_ok=True)
+
+
+def test_affine_quotient_supports_large_constant_mul_carrier(tmp_path):
+    asm_path = tmp_path / "affine_quotient_mul_744.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addi t1,zero,744",
+                "mul t1,a0,t1",
+                "lui a6,0x46a",
+                "addi a6,a6,-1264",
+                "add a4,a6,t1",
+                "lw a2,12(a4)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "li x27, 0x2e8" in init_asm
+        assert "divu x10, x10, x27" in init_asm
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_affine_quotient_supports_two_independent_large_carriers(tmp_path):
+    asm_path = tmp_path / "affine_quotient_two_mul_744.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addiw s4,s4,1",
+                "addi a4,zero,744",
+                "mul a1,a1,a4",
+                "lui a5,0x46a",
+                "addi a5,a5,-1264",
+                "mul a4,a2,a4",
+                "add a1,a5,a1",
+                "lw a3,12(a1)",
+                "lw a0,8(a1)",
+                "add a5,a5,a4",
+                "lw s3,12(a5)",
+                "lw a1,8(a5)",
+                "addw s3,s3,a3",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "divu x11, x11, x27" in init_asm
+        assert "divu x12, x12, x27" in init_asm
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_large_power_of_two_scale_keeps_legacy_path(tmp_path):
+    asm_path = tmp_path / "large_power_of_two_scale.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a5,-1848(gp)",
+                "slli a3,a0,0xb",
+                "addi a3,a3,112",
+                "addi s9,sp,48",
+                "add a5,a5,a3",
+                "addi a2,s9,0",
+                "addi a3,a5,144",
+                "addi a4,a2,0",
+                "ld t3,0(a5)",
+                "ld t1,8(a5)",
+                "ld a7,16(a5)",
+                "ld a6,24(a5)",
+                "ld a0,32(a5)",
+                "ld a1,40(a5)",
+                "sd t3,0(a4)",
+                "sd t1,8(a4)",
+                "sd a7,16(a4)",
+                "sd a6,24(a4)",
+                "sd a0,32(a4)",
+                "sd a1,40(a4)",
+                "addi a5,a5,48",
+                "addi a4,a4,48",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
