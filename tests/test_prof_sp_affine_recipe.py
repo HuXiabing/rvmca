@@ -677,6 +677,66 @@ def test_affine_quotient_supports_two_independent_scaled_liveins(tmp_path):
             path.unlink(missing_ok=True)
 
 
+def test_affine_quotient_avoids_runtime_remainder_stack_saves(tmp_path):
+    asm_path = tmp_path / "affine_quotient_remainder_stack_saves.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addi sp,sp,-96",
+                "sd s2,64(sp)",
+                "addi s2,zero,76",
+                "mul s2,a1,s2",
+                "sd s1,72(sp)",
+                "lui s1,0x542",
+                "addi s1,s1,1744",
+                "sd s6,32(sp)",
+                "sd ra,88(sp)",
+                "addi s6,a1,0",
+                "add s2,s1,s2",
+                "lw a5,4(s2)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "li x11, 0x73c" in init_asm
+        assert "divu x11, x11, x27" in init_asm
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
 def test_affine_quotient_initializes_livein_scratch_register_last(tmp_path):
     asm_path = tmp_path / "affine_quotient_livein_x27_last.S"
     asm_path.write_text(

@@ -10534,7 +10534,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return None
             return scale, const & mask, constraints
 
-        def fixed_sp_affine_quotient_compatible(addr_symbol, access_offset):
+        def fixed_sp_affine_quotient_compatible(
+            addr_symbol,
+            access_offset,
+            access_width=0,
+            avoid_ranges=(),
+        ):
             if runtime_recipe_scratch_unavailable():
                 return True
             mask = (1 << 64) - 1
@@ -10553,6 +10558,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 ) & mask
                 if raw_value % scale:
                     return False
+                if access_width and avoid_ranges:
+                    remainders = _affine_quotient_remainders(
+                        access_offset + _signed_u64(const),
+                        scale,
+                    )
+                    if not remainders:
+                        return False
+                    max_remainder = max(remainders)
+                    runtime_range = (
+                        access_offset + max_remainder,
+                        access_width + max_remainder,
+                    )
+                    if any(
+                        concrete_ranges_overlap(
+                            *runtime_range,
+                            used_offset,
+                            used_width,
+                        )
+                        for used_offset, used_width in avoid_ranges
+                    ):
+                        return False
             return True
 
         def choose_scaled_address_register_value(symbol):
@@ -14760,6 +14786,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if not fixed_sp_affine_quotient_compatible(
                     addr_symbol,
                     access_offset,
+                    width,
+                    avoid_ranges,
                 ):
                     return False
                 if any(
@@ -20618,7 +20646,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         remember_affine_base_offset(base_key, base, addr + imm)
                         remember_equiv_base_offset(base, addr + imm)
 
-                if not fixed_sp_affine_quotient_compatible(addr_symbol, addr):
+                try:
+                    quotient_avoid_ranges = avoid_ranges
+                except NameError:
+                    quotient_avoid_ranges = ()
+                if not fixed_sp_affine_quotient_compatible(
+                    addr_symbol,
+                    addr,
+                    access_width,
+                    quotient_avoid_ranges,
+                ):
                     debug_load_slot_choice(
                         "reject_affine_quotient_inexact",
                         candidate_offset=addr,
@@ -21207,6 +21244,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     fixed_sp_affine_quotient_compatible(
                                         addr_symbol,
                                         candidate,
+                                        access_width,
+                                        avoid_ranges,
                                     )
                                 ),
                             )
@@ -21238,6 +21277,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                         fixed_sp_affine_quotient_compatible(
                                             addr_symbol,
                                             candidate,
+                                            access_width,
+                                            avoid_ranges,
                                         )
                                     ),
                                 )
@@ -21281,6 +21322,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 fixed_sp_affine_quotient_compatible(
                                     addr_symbol,
                                     candidate,
+                                    access_width,
+                                    avoid_ranges,
                                 )
                             ),
                         )
@@ -21304,6 +21347,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     fixed_sp_affine_quotient_compatible(
                                         addr_symbol,
                                         candidate,
+                                        access_width,
+                                        avoid_ranges,
                                     )
                                 ),
                             )
