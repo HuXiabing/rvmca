@@ -11191,8 +11191,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             scale = next(iter(scales))
             if scale <= 1 or scale > MAX_AFFINE_QUOTIENT_SCALE:
                 return None
-            # Existing shift recipes are exact and should retain priority.
-            if not (scale & (scale - 1)):
+            # Shift recipes are exact only up to the guaranteed SP alignment.
+            if not (scale & (scale - 1)) and scale <= RUNTIME_SP_ALIGNMENT:
                 return None
 
             primary_addr, primary_width, _, primary_const = related_accesses[0]
