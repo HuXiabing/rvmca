@@ -168,6 +168,19 @@ def _runtime_reg_recipe_value(sp_value: int, recipe) -> int:
     if (
         isinstance(recipe, (tuple, list))
         and len(recipe) == 4
+        and recipe[0] == 'affine_quotient_linear'
+    ):
+        _, divisor, multiplier, addend = recipe
+        divisor = int(divisor)
+        multiplier = int(multiplier)
+        if divisor <= 1 or multiplier == 0:
+            raise ValueError(f"invalid affine quotient linear recipe: {recipe!r}")
+        return (
+            (sp_value // divisor) * multiplier + int(addend)
+        ) & ((1 << 64) - 1)
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 4
         and recipe[0] == 'affine_scaled_quotient'
     ):
         _, offset, divisor, multiplier = recipe
@@ -1678,7 +1691,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             getattr(inst, 'rs1', None),
                             (None,),
                         )[0]
-                        == 'affine_linear'
+                        in {'affine_linear', 'affine_quotient_linear'}
                     )
                 )
             )
@@ -6717,6 +6730,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         insts.append(RFmtInst('sub', reg_name, 'zero', reg_name))
                     insts.append(UFmtInst('li', scratch, int(anchor_value)))
                     insts.append(RFmtInst('add', reg_name, reg_name, scratch))
+                    return
+                if recipe_kind == 'affine_quotient_linear':
+                    _, divisor, multiplier, addend = force_affine_quotient
+                    divisor = int(divisor)
+                    multiplier = int(multiplier)
+                    if divisor <= 1 or multiplier == 0:
+                        raise ValueError(
+                            f"invalid affine quotient linear recipe: "
+                            f"{force_affine_quotient!r}"
+                        )
+                    scratch = alternate_scratch
+                    insts.append(UFmtInst('li', scratch, divisor))
+                    insts.append(RFmtInst('divu', reg_name, 'sp', scratch))
+                    if abs(multiplier) > 1:
+                        insts.append(UFmtInst('li', scratch, abs(multiplier)))
+                        insts.append(RFmtInst('mul', reg_name, reg_name, scratch))
+                    if multiplier < 0:
+                        insts.append(RFmtInst('sub', reg_name, 'zero', reg_name))
+                    if addend:
+                        insts.append(UFmtInst('li', scratch, int(addend)))
+                        insts.append(RFmtInst('add', reg_name, reg_name, scratch))
                     return
                 if recipe_kind == 'affine_quotient':
                     _, offset, divisor = force_affine_quotient
@@ -22940,8 +22974,228 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 'affected_accesses': len(component_addresses),
                             })}")
 
+            def install_fractional_livein_recipe():
+                loaded_value_vars = set().union(*(
+                    expr_vars(rd_symbol)
+                    for _, rd_symbol, _, _ in load_accesses
+                )) if load_accesses else set()
+                mask = (1 << 64) - 1
+
+                for source_reg in regs_undefined:
+                    if (
+                        source_reg in reg_runtime_recipes
+                        or source_reg not in reg_values
+                        or flows_to_control(source_reg)
+                    ):
+                        continue
+                    source_symbol = reg_to_symbol.get(source_reg)
+                    source_vars = expr_vars(source_symbol)
+                    if not source_vars:
+                        continue
+                    scaled = scaled_stack_transform_for_value(
+                        reg_values[source_reg]
+                    )
+                    if scaled is None:
+                        continue
+                    _, shift = scaled
+                    divisor = 1 << shift
+                    if RUNTIME_SP_ALIGNMENT % divisor:
+                        continue
+                    if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                        DEBUG(f"fractional_linear_runtime_source {({
+                            'reg': source_reg.name,
+                            'scaled': scaled,
+                            'divisor': divisor,
+                        })}")
+
+                    affected_addresses = {
+                        addr_symbol.hash(): addr_symbol
+                        for _, addr_symbol, _, _ in runtime_translation_mem_accesses
+                        if expr_vars(addr_symbol) & source_vars
+                    }
+                    if len(affected_addresses) != 2:
+                        continue
+                    affected_vars = set().union(*(
+                        expr_vars(addr_symbol)
+                        for addr_symbol in affected_addresses.values()
+                    ))
+                    if affected_vars & loaded_value_vars:
+                        continue
+                    if (
+                        affected_vars
+                        & (unsupported_runtime_source_vars - source_vars)
+                    ):
+                        continue
+
+                    affected_livein_regs = {
+                        reg
+                        for reg, symbol in reg_to_symbol.items()
+                        if expr_vars(symbol) & affected_vars
+                    }
+                    companion_regs = affected_livein_regs - {source_reg}
+                    if len(companion_regs) != 1:
+                        continue
+                    companion_reg = next(iter(companion_regs))
+                    if (
+                        companion_reg in reg_runtime_recipes
+                        or companion_reg not in reg_values
+                        or flows_to_control(companion_reg)
+                    ):
+                        continue
+                    companion_symbol = reg_to_symbol.get(companion_reg)
+                    companion_vars = expr_vars(companion_symbol)
+                    if not companion_vars:
+                        continue
+
+                    coefficient_symbol = claripy.BVS(
+                        f"rvmca_fractional_linear_coefficient_{companion_reg.name}",
+                        64,
+                    )
+                    unit_delta = claripy.BVV(divisor, 64)
+                    solve_replacements = {
+                        key: claripy.replace_dict(value, {
+                            translation_delta.hash(): unit_delta,
+                        })
+                        for key, value in base_replacements.items()
+                    }
+                    solve_replacements[source_symbol.hash()] = source_symbol + 1
+                    solve_replacements[companion_symbol.hash()] = (
+                        companion_symbol + coefficient_symbol
+                    )
+
+                    coefficient_solver = claripy.Solver()
+                    coefficient_solver.timeout = max(local_solver_timeout_ms, 1000)
+                    negative_floor = (1 << 64) - STACK_RANGE
+                    coefficient_solver.add(coefficient_symbol != 0)
+                    coefficient_solver.add(claripy.Or(
+                        coefficient_symbol <= STACK_RANGE,
+                        coefficient_symbol >= negative_floor,
+                    ))
+                    for addr_symbol in affected_addresses.values():
+                        coefficient_solver.add(
+                            claripy.replace_dict(addr_symbol, solve_replacements)
+                            == addr_symbol + unit_delta
+                        )
+                    try:
+                        if not coefficient_solver.satisfiable():
+                            if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                                DEBUG("fractional_linear_runtime_coefficient_unsat")
+                            continue
+                        raw_coefficient = coefficient_solver.eval(
+                            coefficient_symbol,
+                            1,
+                        )[0]
+                    except Exception:
+                        continue
+                    coefficient = (
+                        raw_coefficient
+                        if raw_coefficient < (1 << 63)
+                        else raw_coefficient - (1 << 64)
+                    )
+
+                    proof_replacements = {
+                        key: claripy.replace_dict(value, {
+                            translation_delta.hash(): unit_delta,
+                        })
+                        for key, value in base_replacements.items()
+                    }
+                    proof_replacements[source_symbol.hash()] = source_symbol + 1
+                    proof_replacements[companion_symbol.hash()] = (
+                        companion_symbol + expr_bvv(
+                            coefficient & mask,
+                            companion_symbol,
+                        )
+                    )
+                    if not all(
+                        translation_identity(
+                            claripy.replace_dict(addr_symbol, proof_replacements),
+                            addr_symbol + unit_delta,
+                        )
+                        for addr_symbol in affected_addresses.values()
+                    ):
+                        if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                            DEBUG(f"fractional_linear_runtime_proof_failed {({
+                                'coefficient': coefficient,
+                                'addresses': [
+                                    str(addr_symbol)
+                                    for addr_symbol in affected_addresses.values()
+                                ],
+                                'translated': [
+                                    str(claripy.simplify(claripy.replace_dict(
+                                        addr_symbol,
+                                        proof_replacements,
+                                    )))
+                                    for addr_symbol in affected_addresses.values()
+                                ],
+                            })}")
+                        continue
+
+                    source_anchor = reg_values[source_reg] & mask
+                    source_replays = []
+                    source_valid = True
+                    for replay_sp in CONCRETE_REPLAY_ALT_SPS:
+                        sp_delta = replay_sp - CONCRETE_REPLAY_SP
+                        if sp_delta % divisor:
+                            source_valid = False
+                            break
+                        expected = (
+                            source_anchor + sp_delta // divisor
+                        ) & mask
+                        actual = runtime_reg_value(
+                            source_reg,
+                            source_anchor,
+                            replay_sp,
+                            reg_runtime_recipes,
+                        )
+                        source_replays.append(actual)
+                        if actual != expected:
+                            source_valid = False
+                            break
+                    if not source_valid:
+                        if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                            DEBUG(f"fractional_linear_runtime_source_replay_failed {({
+                                'reg': source_reg.name,
+                                'values': source_replays,
+                            })}")
+                        continue
+
+                    companion_anchor = reg_values[companion_reg] & mask
+                    addend = (
+                        companion_anchor
+                        - (CONCRETE_REPLAY_SP // divisor) * coefficient
+                    ) & mask
+                    recipe = (
+                        'affine_quotient_linear',
+                        divisor,
+                        coefficient,
+                        addend,
+                    )
+                    if any(
+                        _runtime_reg_recipe_value(replay_sp, recipe)
+                        != (
+                            companion_anchor
+                            + coefficient
+                            * ((replay_sp - CONCRETE_REPLAY_SP) // divisor)
+                        ) & mask
+                        for replay_sp in CONCRETE_REPLAY_ALT_SPS
+                    ):
+                        continue
+
+                    reg_runtime_recipes[companion_reg] = recipe
+                    reg_runtime_accesses[companion_reg] = ()
+                    if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                        DEBUG(f"fractional_linear_runtime_recipe_selected {({
+                            'source_reg': source_reg.name,
+                            'companion_reg': companion_reg.name,
+                            'divisor': divisor,
+                            'coefficient': coefficient,
+                            'affected_accesses': len(affected_addresses),
+                        })}")
+                    return
+
             if not source_replacements:
                 install_joint_livein_recipes()
+                install_fractional_livein_recipe()
                 return
 
             coefficient_candidates = [

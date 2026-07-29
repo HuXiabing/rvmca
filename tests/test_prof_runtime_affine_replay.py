@@ -55,6 +55,18 @@ COUPLED_LIVEIN_BASE_BLOCK_ASM = [
     "sd s9,64(a2)",
 ]
 
+FRACTIONAL_COUPLED_LIVEIN_BLOCK_ASM = [
+    "addi a4,s5,-640",
+    "add a4,a4,a5",
+    "lbu s1,0(a4)",
+    "lui a4,0x318",
+    "slli a5,a5,0x3",
+    "addi a4,a4,-320",
+    "add a5,a4,a5",
+    "addiw s0,s1,-1",
+    "ld s7,0(a5)",
+]
+
 
 def test_linear_runtime_recipe_tracks_signed_sp_coefficient():
     anchor_value = CONCRETE_REPLAY_SP - 0x380
@@ -70,6 +82,47 @@ def test_coupled_livein_bases_replay_safely(tmp_path):
     asm_path = tmp_path / "coupled_livein_bases.S"
     asm_path.write_text(
         "\n".join(COUPLED_LIVEIN_BASE_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_fractional_coupled_livein_bases_replay_safely(tmp_path):
+    asm_path = tmp_path / "fractional_coupled_livein_bases.S"
+    asm_path.write_text(
+        "\n".join(FRACTIONAL_COUPLED_LIVEIN_BLOCK_ASM) + "\n",
         encoding="utf-8",
     )
     generated_paths = [
