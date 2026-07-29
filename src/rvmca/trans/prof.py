@@ -10925,10 +10925,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 scale, const, scaled_constraints = scaled
                 runtime_accesses = []
-                runtime_constraint_keys = {
-                    str(claripy.simplify(constraint))
-                    for constraint in scaled_constraints
-                }
                 runtime_blocked_vars = symbol_vars | expr_vars(init_sp)
 
                 def runtime_stable_constraints(constraints):
@@ -10952,14 +10948,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         runtime_recipe_eligible = False
                         continue
                     other_scale, other_const, other_constraints = other_scaled
-                    other_constraint_keys = {
-                        str(claripy.simplify(constraint))
-                        for constraint in other_constraints
-                    }
                     if (
                         other_scale != scale
                         or not runtime_stable_constraints(other_constraints)
-                        or other_constraint_keys != runtime_constraint_keys
                     ):
                         runtime_recipe_eligible = False
                         continue
@@ -10977,13 +10968,18 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if other_scaled is None:
                         continue
                     other_scale, other_const, other_constraints = other_scaled
-                    if other_scale != scale or other_constraints:
+                    if other_scale != scale:
                         continue
                     delta = _signed_u64((const - other_const) & ((1 << 64) - 1))
-                    group_requirements.append((other_addr_symbol, delta, other_width))
+                    group_requirements.append((
+                        other_addr_symbol,
+                        delta,
+                        other_width,
+                        other_constraints,
+                    ))
 
                 def scaled_register_group_ok(access_offset):
-                    for _, delta, other_width in group_requirements:
+                    for _, delta, other_width, _ in group_requirements:
                         other_offset = access_offset + delta
                         if other_offset <= 0 or other_offset > STACK_RANGE:
                             return False
@@ -11006,7 +11002,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     starts.insert(0, known_access_offset)
                 starts.extend(used + max(width, used_width) for used, used_width in used_stack_offsets)
                 group_low = align
-                for _, delta, other_width in group_requirements:
+                for _, delta, other_width, _ in group_requirements:
                     group_low = max(group_low, other_width - delta)
                 if group_low > align:
                     starts.insert(0, group_low)
@@ -11029,10 +11025,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         if raw_value % scale:
                             continue
                         value = (raw_value // scale) & ((1 << 64) - 1)
-                        group_targets = [
-                            (other_addr_symbol, concrete_stack_addr(access_offset + delta))
-                            for other_addr_symbol, delta, _ in group_requirements
-                        ]
+                        group_targets = []
+                        group_constraints = list(scaled_constraints)
+                        for (
+                            other_addr_symbol,
+                            delta,
+                            _,
+                            other_constraints,
+                        ) in group_requirements:
+                            group_targets.append((
+                                other_addr_symbol,
+                                concrete_stack_addr(access_offset + delta),
+                            ))
+                            group_constraints.extend(other_constraints)
                         runtime_info = None
                         direct_scaled_recipe = scaled_stack_transform_for_value(value)
                         needs_quotient_recipe = (
@@ -11088,7 +11093,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             addr_symbol,
                             target_addr,
                             access_offset,
-                            scaled_constraints,
+                            group_constraints,
                             group_targets,
                             runtime_info,
                         ))

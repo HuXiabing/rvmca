@@ -906,6 +906,75 @@ def test_affine_quotient_supports_two_independent_large_carriers(tmp_path):
             path.unlink(missing_ok=True)
 
 
+def test_affine_quotient_supports_independent_loaded_residuals(tmp_path):
+    asm_path = tmp_path / "affine_quotient_multi_loaded_residual_2000.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addi a5,zero,500",
+                "mul t3,t3,a5",
+                "lw a1,0(a2)",
+                "lui a2,0xc",
+                "lw t1,0(a3)",
+                "addi a2,a2,-1653",
+                "lui a3,0xae0",
+                "addi a3,a3,1744",
+                "addi a0,zero,3",
+                "addi a7,zero,6",
+                "add a5,t3,a1",
+                "add a5,a5,a2",
+                "slli a5,a5,0x2",
+                "add a5,a3,a5",
+                "add t3,t3,t1",
+                "add t3,t3,a2",
+                "lw t1,0(a5)",
+                "slli t3,t3,0x2",
+                "add a3,a3,t3",
+                "lw a5,0(a3)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "li x27, 0x7d0" in init_asm
+        assert "divu x28, x28, x27" in init_asm
+        assert init_asm.count("li x31, 0x0") >= 2
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
 def test_large_power_of_two_scale_keeps_legacy_path(tmp_path):
     asm_path = tmp_path / "large_power_of_two_scale.S"
     asm_path.write_text(
