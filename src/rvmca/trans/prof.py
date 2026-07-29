@@ -11165,13 +11165,32 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             scale = scaled[0]
             return not (scale & (scale - 1))
 
-        def choose_affine_quotient_loaded_address_value(symbol, load_idx):
+        loaded_affine_quotient_choices = {}
+
+        def choose_affine_quotient_loaded_address_value(
+            symbol,
+            load_idx,
+            require_explicit_livein_constraints=False,
+        ):
             """Choose a runtime-SP quotient for a scaled loaded address value."""
+            choice_key = (load_idx, expr_key(symbol))
+            if choice_key in loaded_affine_quotient_choices:
+                return loaded_affine_quotient_choices[choice_key]
             symbol_vars = expr_vars(symbol)
             if not symbol_vars:
                 return None
 
             related_accesses = []
+            affine_constraints = []
+            affine_constraint_keys = set()
+            affine_constraint_vars = set()
+            livein_vars = set()
+            for livein_symbol in reg_to_symbol.values():
+                livein_vars.update(expr_vars(livein_symbol))
+            loaded_value_vars = set()
+            for _, loaded_symbol, _, _ in load_accesses:
+                loaded_value_vars.update(expr_vars(loaded_symbol))
+            used_explicit_livein_constraints = False
             for _, addr_symbol, access_idx, width in mem_accesses:
                 if access_idx <= load_idx or not (expr_vars(addr_symbol) & symbol_vars):
                     continue
@@ -11187,11 +11206,49 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             claripy.Not(claripy.And(*constraints))
                         )
                         if implication_solver.satisfiable():
-                            return None
+                            if (
+                                scale <= RUNTIME_SP_ALIGNMENT
+                                or scale & (scale - 1)
+                            ):
+                                return None
+                            constraint_vars = set().union(*(
+                                expr_vars(constraint)
+                                for constraint in constraints
+                            ))
+                            if (
+                                not constraint_vars
+                                or not constraint_vars <= livein_vars
+                                or constraint_vars & loaded_value_vars
+                            ):
+                                return None
+                            for constraint in constraints:
+                                key = str(claripy.simplify(constraint))
+                                if key in affine_constraint_keys:
+                                    continue
+                                affine_constraint_keys.add(key)
+                                affine_constraints.append(constraint)
+                            for livein_symbol in reg_to_symbol.values():
+                                if not (expr_vars(livein_symbol) & constraint_vars):
+                                    continue
+                                zero_constraint = (
+                                    livein_symbol == expr_bvv(0, livein_symbol)
+                                )
+                                key = str(claripy.simplify(zero_constraint))
+                                if key in affine_constraint_keys:
+                                    continue
+                                affine_constraint_keys.add(key)
+                                affine_constraints.append(zero_constraint)
+                            affine_constraint_vars.update(constraint_vars)
+                            used_explicit_livein_constraints = True
                     except Exception:
                         return None
                 related_accesses.append((addr_symbol, width, scale, _signed_u64(const)))
             if not related_accesses:
+                return None
+            if (
+                require_explicit_livein_constraints
+                and not used_explicit_livein_constraints
+            ):
                 return None
 
             scales = {scale for _, _, scale, _ in related_accesses}
@@ -11272,7 +11329,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         continue
 
                     value = numerator // scale
-                    constraints = [symbol == expr_bvv(value, symbol)]
+                    constraints = list(affine_constraints)
+                    constraints.append(symbol == expr_bvv(value, symbol))
                     constraints.extend(
                         addr_symbol == target_addr
                         for addr_symbol, target_addr in group_targets
@@ -11281,7 +11339,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         try_add_constraint_set_fast(constraints, timeout_ms=5000)
                         or try_add_constraint_set_related(
                             constraints,
-                            symbol_vars,
+                            symbol_vars | affine_constraint_vars,
                             timeout_ms=5000,
                         )
                     ):
@@ -11305,7 +11363,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             'remainders': remainders,
                             'access_count': len(related_accesses),
                         })}")
-                    return value, recipe
+                    choice = (value, recipe)
+                    loaded_affine_quotient_choices[choice_key] = choice
+                    return choice
             return None
 
         def choose_scaled_loaded_address_value(symbol):
@@ -18715,6 +18775,34 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 for reg in sorted(mixed_affine_residual_regs, key=lambda item: item.id)
             ])
 
+        for load_inst, loaded_symbol, _, load_idx in load_accesses:
+            if load_inst.width != 8:
+                continue
+            loaded_value_expr = mem_value_expr(load_inst, loaded_symbol)
+            if (
+                load_value_has_direct_pointer_use(loaded_value_expr, load_idx)
+                or load_value_has_direct_store_addr_use(loaded_value_expr, load_idx)
+                or not is_deferred_loaded_address_scalar(
+                    load_inst,
+                    loaded_value_expr,
+                    load_idx,
+                )
+            ):
+                continue
+            preselected_choice = choose_affine_quotient_loaded_address_value(
+                loaded_value_expr,
+                load_idx,
+                require_explicit_livein_constraints=True,
+            )
+            if (
+                preselected_choice is not None
+                and os.environ.get("RVMCA_DEBUG_REPAIR") == "1"
+            ):
+                DEBUG(f"loaded_affine_quotient_preselected {({
+                    'inst_idx': load_idx,
+                    'choice': preselected_choice,
+                })}")
+
         ordered_undefined_regs = [
             r for r in regs_undefined
             if r in mixed_affine_residual_regs
@@ -21378,10 +21466,15 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 inst_idx=inst_idx,
                 phase="field:deferred_scaled_check",
             )
+            deferred_loaded_address_scalar = is_deferred_loaded_address_scalar(
+                inst,
+                value_expr,
+                inst_idx,
+            )
             if (
                 not value_has_direct_pointer_use
                 and not value_is_store_address_base
-                and is_deferred_loaded_address_scalar(inst, value_expr, inst_idx)
+                and deferred_loaded_address_scalar
             ):
                 affine_quotient_choice = choose_affine_quotient_loaded_address_value(
                     value_expr,
