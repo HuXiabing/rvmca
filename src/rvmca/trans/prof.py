@@ -149,6 +149,19 @@ def _runtime_reg_recipe_value(sp_value: int, recipe) -> int:
     if (
         isinstance(recipe, (tuple, list))
         and len(recipe) == 3
+        and recipe[0] == 'affine_linear'
+    ):
+        _, anchor_value, coefficient = recipe
+        coefficient = int(coefficient)
+        if coefficient == 0:
+            raise ValueError(f"invalid affine linear coefficient: {coefficient}")
+        sp_delta = (sp_value - CONCRETE_REPLAY_SP) & ((1 << 64) - 1)
+        return (
+            int(anchor_value) + coefficient * sp_delta
+        ) & ((1 << 64) - 1)
+    if (
+        isinstance(recipe, (tuple, list))
+        and len(recipe) == 3
         and recipe[0] == 'affine_quotient'
     ):
         return _affine_quotient_value(sp_value, recipe)
@@ -6308,6 +6321,24 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         ):
             if force_affine_quotient is not None:
                 recipe_kind = force_affine_quotient[0]
+                if recipe_kind == 'affine_linear':
+                    _, anchor_value, coefficient = force_affine_quotient
+                    coefficient = int(coefficient)
+                    if coefficient == 0:
+                        raise ValueError(
+                            f"invalid affine linear coefficient: {coefficient}"
+                        )
+                    scratch = TEMP_REG2 if reg_name != TEMP_REG2 else TEMP_REG
+                    insts.append(UFmtInst('li', reg_name, CONCRETE_REPLAY_SP))
+                    insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
+                    if abs(coefficient) > 1:
+                        insts.append(UFmtInst('li', scratch, abs(coefficient)))
+                        insts.append(RFmtInst('mul', reg_name, reg_name, scratch))
+                    if coefficient < 0:
+                        insts.append(RFmtInst('sub', reg_name, 'zero', reg_name))
+                    insts.append(UFmtInst('li', scratch, int(anchor_value)))
+                    insts.append(RFmtInst('add', reg_name, reg_name, scratch))
+                    return
                 if recipe_kind == 'affine_quotient':
                     _, offset, divisor = force_affine_quotient
                     multiplier = 1
@@ -21897,6 +21928,225 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if r in deferred_regs:
                 _write_profile_stage(name, "init:materialize_init:deferred_registers")
                 materialize_register(r)
+
+        def install_linear_runtime_register_recipes():
+            if (
+                find_reg_by_name(TEMP_REG) in regs_undefined
+                or find_reg_by_name(TEMP_REG2) in regs_undefined
+            ):
+                return
+
+            translation_delta = claripy.BVS(
+                "rvmca_linear_runtime_translation_delta",
+                64,
+            )
+            base_replacements = {
+                init_sp.hash(): init_sp + translation_delta,
+            }
+            source_replacements = {}
+            source_coefficients = {}
+            unsupported_runtime_source_vars = set()
+
+            def translation_identity(left, right):
+                equality = claripy.simplify(left == right)
+                if claripy.is_true(equality):
+                    return True
+                proof_solver = claripy.Solver()
+                proof_solver.timeout = max(local_solver_timeout_ms, 1000)
+                proof_solver.add(claripy.Not(equality))
+                try:
+                    return proof_solver.satisfiable() is False
+                except Exception:
+                    return False
+
+            for runtime_reg, runtime_value in reg_values.items():
+                runtime_symbol = reg_to_symbol.get(runtime_reg)
+                runtime_vars = expr_vars(runtime_symbol)
+                if not runtime_vars:
+                    continue
+                runtime_recipe = reg_runtime_recipes.get(runtime_reg)
+                if runtime_recipe is not None:
+                    if runtime_recipe[0] == 'affine_linear':
+                        runtime_coefficient = int(runtime_recipe[2])
+                        base_replacements[runtime_symbol.hash()] = (
+                            runtime_symbol + translation_delta * expr_bvv(
+                                runtime_coefficient & ((1 << 64) - 1),
+                                runtime_symbol,
+                            )
+                        )
+                    else:
+                        unsupported_runtime_source_vars.update(runtime_vars)
+                    continue
+                if signed_stack_offset_for_value(runtime_value) is not None:
+                    base_replacements[runtime_symbol.hash()] = (
+                        runtime_symbol + translation_delta
+                    )
+                elif scaled_stack_transform_for_value(runtime_value) is not None:
+                    unsupported_runtime_source_vars.update(runtime_vars)
+
+            for load_inst, value_expr, load_addr_symbol, load_idx in mem_entries:
+                layout = load_slot_layouts.get(load_idx)
+                if layout is None:
+                    continue
+                word_offset, byte_offset, layout_width = layout
+                if load_inst.width != 8 or layout_width != 8 or byte_offset != 0:
+                    continue
+                mode = sp_affine_mode(sp_affine_mem_offsets, word_offset)
+                value_vars = expr_vars(value_expr)
+                if mode == 'direct':
+                    coefficient = 1
+                elif mode == 'inverse':
+                    coefficient = -1
+                elif mode is None:
+                    slot_value = mem_values.get(word_offset)
+                    if (
+                        slot_value is None
+                        or signed_stack_offset_for_value(slot_value) is None
+                    ):
+                        continue
+                    coefficient = 1
+                else:
+                    unsupported_runtime_source_vars.update(value_vars)
+                    continue
+                if any(
+                    store_idx < load_idx
+                    and exprs_may_be_related(store_addr_symbol, load_addr_symbol)
+                    for _, store_addr_symbol, store_idx, _, _ in store_accesses
+                ):
+                    unsupported_runtime_source_vars.update(value_vars)
+                    continue
+
+                translated_load_addr = claripy.replace_dict(
+                    load_addr_symbol,
+                    base_replacements,
+                )
+                if not translation_identity(
+                    translated_load_addr,
+                    load_addr_symbol + translation_delta,
+                ):
+                    unsupported_runtime_source_vars.update(value_vars)
+                    continue
+
+                source_key = expr_key(value_expr)
+                previous_coefficient = source_coefficients.get(source_key)
+                if (
+                    previous_coefficient is not None
+                    and previous_coefficient != coefficient
+                ):
+                    unsupported_runtime_source_vars.update(value_vars)
+                    source_replacements.pop(value_expr.hash(), None)
+                    continue
+                source_coefficients[source_key] = coefficient
+                source_replacements[value_expr.hash()] = (
+                    value_expr + translation_delta * expr_bvv(
+                        coefficient & ((1 << 64) - 1),
+                        value_expr,
+                    )
+                )
+
+            if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                DEBUG(f"linear_runtime_recipe_sources {({
+                    'source_count': len(source_replacements),
+                    'base_count': len(base_replacements),
+                    'unsupported_vars': sorted(unsupported_runtime_source_vars),
+                })}")
+            if not source_replacements:
+                return
+
+            def flows_to_control(reg):
+                tainted = {reg}
+                for inst in prog.insts:
+                    uses = set(inst.get_uses() or [])
+                    if tainted & uses and inst.type in [IType.Branch, IType.Jump]:
+                        return True
+                    rd = inst.get_def()
+                    if rd is None or rd == XREG[0]:
+                        continue
+                    if tainted & uses:
+                        tainted.add(rd)
+                    elif rd in tainted:
+                        tainted.remove(rd)
+                    if not tainted:
+                        break
+                return False
+
+            coefficient_candidates = [
+                coefficient
+                for magnitude in range(2, 65)
+                for coefficient in (-magnitude, magnitude)
+            ]
+            for reg in regs_undefined:
+                if reg in reg_runtime_recipes or reg not in reg_values:
+                    continue
+                if reg not in base_like_regs:
+                    continue
+                if flows_to_control(reg):
+                    continue
+                symbol = reg_to_symbol.get(reg)
+                symbol_vars = expr_vars(symbol)
+                if not symbol_vars:
+                    continue
+                affected_addresses = [
+                    addr_symbol
+                    for _, addr_symbol, _, _ in mem_accesses
+                    if expr_vars(addr_symbol) & symbol_vars
+                ]
+                if not affected_addresses:
+                    continue
+                affected_vars = set().union(*(
+                    expr_vars(addr_symbol)
+                    for addr_symbol in affected_addresses
+                ))
+                if affected_vars & unsupported_runtime_source_vars:
+                    continue
+                if not any(
+                    expr_vars(source_expr) & affected_vars
+                    for _, source_expr, _, _ in load_accesses
+                    if source_expr.hash() in source_replacements
+                ):
+                    continue
+
+                for coefficient in coefficient_candidates:
+                    replacements = dict(base_replacements)
+                    replacements.update(source_replacements)
+                    replacements[symbol.hash()] = (
+                        symbol + translation_delta * expr_bvv(
+                            coefficient & ((1 << 64) - 1),
+                            symbol,
+                        )
+                    )
+                    if not all(
+                        translation_identity(
+                            claripy.replace_dict(addr_symbol, replacements),
+                            addr_symbol + translation_delta,
+                        )
+                        for addr_symbol in affected_addresses
+                    ):
+                        continue
+
+                    anchor_value = reg_values[reg] & ((1 << 64) - 1)
+                    recipe = ('affine_linear', anchor_value, coefficient)
+                    if _runtime_reg_recipe_value(CONCRETE_REPLAY_SP, recipe) != anchor_value:
+                        continue
+                    reg_runtime_recipes[reg] = recipe
+                    reg_runtime_accesses[reg] = ()
+                    if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                        DEBUG(f"linear_runtime_recipe_selected {({
+                            'reg': reg.name,
+                            'coefficient': coefficient,
+                            'affected_accesses': len(affected_addresses),
+                        })}")
+                    break
+                else:
+                    if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                        DEBUG(f"linear_runtime_recipe_unproved {({
+                            'reg': reg.name,
+                            'affected_addresses': [
+                                str(addr) for addr in affected_addresses
+                            ],
+                        })}")
+
+        install_linear_runtime_register_recipes()
 
         seen_dynamic_mem_inits = set()
         store_name_for_width = {
