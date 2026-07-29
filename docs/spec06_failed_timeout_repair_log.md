@@ -1204,3 +1204,130 @@ FAIL                              0
 SKIP                              0
 regressed                         0
 ```
+
+## Post-1821 Repair: Proven No-Clobber for Repeated High Slots
+
+Three remaining WRF blocks repeatedly load a pointer from the same source
+address around many intervening stores. Earlier loads had already forced the
+source slot to offset 3080. The low-guard check rejected that exact offset
+solely because a same-address load occurred after an intervening store, while
+all lower candidates were inconsistent with the already committed source
+address. The blocks therefore failed at
+`init:materialize_init:load_slots:entry` even though a legal store-disjoint
+initial state existed.
+
+The repair reuses the existing byte-accurate store/load no-clobber proof. For
+each future same-address, same-width load, it requires the candidate address
+and every intervening store to be jointly satisfiable with complete byte-range
+non-overlap constraints. Those constraints are included in the final
+candidate commit, and the high slot is remembered as proven only after that
+commit succeeds. A forced store alias, solver timeout or exception, an
+unsatisfiable individual proof, or an unsatisfiable union retains the old
+rejection. Prior-store conflict checks, replay range and alignment checks,
+assembly, and real QEMU/pp validation are unchanged.
+
+The structural regression contains the full `481.wrf_578` instruction shape
+and requires a real QEMU/pp cycle result. The complete pointer-slot suite
+reported:
+
+```text
+tests/test_prof_pointer_slot_alias.py  8 passed in 145.20s
+```
+
+The three original-failed candidates all completed the full measurement path:
+
+```text
+481.wrf_578   PASS
+481.wrf_810   PASS
+481.wrf_1275  PASS
+```
+
+The focused report and frozen attributed ID set are:
+
+```text
+tests/failure_reports/spec06_wrf_low_guard_no_overlap_candidate3_ordered_300/status.json
+tests/failure_reports/id_sets/spec06_wrf_positive_avoid_hard_conflict3.ids
+```
+
+The behavior-adjacent prior benefit sets were rerun with the same profiler and
+remained PASS with no FAIL, SKIP, or timeout:
+
+```text
+read-only/forced store-load alias set    10 / 10 PASS
+additional forced-alias set               2 /  2 PASS
+repeated pointer-source set              20 / 20 PASS
+```
+
+The frozen profiler SHA-256 for this round is:
+
+```text
+eb0c1a99c91eb939b024259f98c8a8d46cddd9cfbd8b7945375cde65d6adcb60
+```
+
+The new 3-ID set has an empty intersection with all 1,821 previously frozen
+benefit IDs. The 15-set union contains exactly 1,824 unique IDs:
+
+```text
+previously confirmed original failed -> PASS   1821
+new proven no-clobber PASS                         3
+confirmed original failed -> PASS               1824
+1824 / 2375                                    76.80%
+original failed -> SKIP counted as benefit          0
+```
+
+Two additional original-failed blocks were found outside the attributed
+benefit sets and then rerun individually with the same profiler. Both
+completed transform, concrete replay, assembly, and QEMU/pp measurement as
+PASS:
+
+```text
+400.perlbench_12306  PASS
+464.h264ref_7608     PASS
+```
+
+The confirmation reports and frozen disjoint ID set are:
+
+```text
+tests/failure_reports/spec06_perlbench_12306_confirm_eb0c_300/status.json
+tests/failure_reports/spec06_h264ref_7608_confirm_eb0c_300/status.json
+tests/failure_reports/id_sets/spec06_unlogged_current_pass2.ids
+```
+
+These two blocks are counted as current-profiler PASS, but are not attributed
+to the repeated-high-slot repair without a strict old/new A/B result. The
+conservative current-profiler total is therefore:
+
+```text
+previously confirmed original failed -> PASS   1821
+new proven no-clobber PASS                         3
+additional confirmed current-profiler PASS        2
+confirmed original failed -> PASS               1826
+1826 / 2375                                    76.88%
+original failed -> SKIP counted as benefit          0
+```
+
+The exact 2,021 historical PASS hard gate used two workers, original ID order,
+and a 300-second per-block budget. It completed in 6,683.6 seconds with 2,020
+PASS, zero ordinary FAIL, zero SKIP, and only the known budget-sensitive
+`456.hmmer_402` timeout:
+
+```text
+tests/failure_reports/legacy2021_low_guard_no_overlap_ordered_300.json
+```
+
+The identical profiler completed `456.hmmer_402` through real QEMU/pp as PASS
+in 371.88 seconds with one worker and a 600-second budget:
+
+```text
+tests/failure_reports/legacy_hmmer_402_low_guard_no_overlap_600.json
+```
+
+Exact-ID reconciliation is:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+ordinary FAIL                     0
+SKIP                              0
+regressed                         0
+```

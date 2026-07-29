@@ -20113,7 +20113,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         return False
                 return True
 
-            def low_guard_prior_store_conflict(addr):
+            low_guard_reuse_proven_offsets = set()
+
+            def low_guard_prior_store_conflict(addr, slot_reuse_constraints=None):
                 def prior_store_may_clobber_current_slot():
                     for store_offset, store_width, store_addr_symbol, _ in prior_store_avoid_ranges:
                         if not concrete_ranges_overlap(
@@ -20125,6 +20127,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             continue
                         if same_address(addr_symbol, store_addr_symbol, allow_solver=False):
                             continue
+                        debug_load_slot_choice(
+                            "low_guard_prior_store_overlap",
+                            candidate_offset=addr,
+                            store_offset=store_offset,
+                            store_width=store_width,
+                            store_addr=str(store_addr_symbol),
+                        )
                         return True
                     for _, store_addr_symbol, store_idx, store_width, _ in store_accesses:
                         if store_idx >= inst_idx:
@@ -20135,22 +20144,40 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         if store_offset is not None:
                             continue
                         if exprs_may_be_related(addr_symbol, store_addr_symbol):
+                            debug_load_slot_choice(
+                                "low_guard_related_prior_store",
+                                candidate_offset=addr,
+                                store_idx=store_idx,
+                                store_width=store_width,
+                                store_addr=str(store_addr_symbol),
+                            )
                             return True
                     return False
 
                 def future_same_addr_reused_after_store():
+                    if addr in low_guard_reuse_proven_offsets:
+                        return False
                     for _, future_addr_symbol, future_idx, future_width in mem_accesses:
                         if future_idx <= inst_idx or future_width != inst.width:
                             continue
                         if not any(inst_idx < store_idx < future_idx for _, _, store_idx, _, _ in store_accesses):
                             continue
-                        if same_address(addr_symbol, future_addr_symbol, allow_solver=False):
-                            return True
-                        affine_same = affine_same_or_distinct(addr_symbol, future_addr_symbol)
-                        if affine_same is True:
-                            return True
+                        same_future_addr = same_address(
+                            addr_symbol,
+                            future_addr_symbol,
+                            allow_solver=False,
+                        )
+                        if not same_future_addr:
+                            same_future_addr = (
+                                affine_same_or_distinct(
+                                    addr_symbol,
+                                    future_addr_symbol,
+                                )
+                                is True
+                            )
                         if (
-                            hard_slot_type_load
+                            not same_future_addr
+                            and hard_slot_type_load
                             and exprs_may_be_related(addr_symbol, future_addr_symbol)
                             and solver_same_address(
                                 addr_symbol,
@@ -20158,12 +20185,48 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 timeout_ms=100,
                             )
                         ):
-                            return True
+                            same_future_addr = True
+                        if not same_future_addr:
+                            continue
+                        reuse_constraints = None
+                        if slot_reuse_constraints is not None:
+                            reuse_constraints = future_load_slot_reuse_constraints(
+                                addr,
+                                future_addr_symbol,
+                                future_idx,
+                                future_width,
+                            )
+                        if reuse_constraints is not None:
+                            known_constraints = {
+                                str(claripy.simplify(constraint))
+                                for constraint in slot_reuse_constraints
+                            }
+                            for constraint in reuse_constraints:
+                                constraint_key = str(claripy.simplify(constraint))
+                                if constraint_key in known_constraints:
+                                    continue
+                                known_constraints.add(constraint_key)
+                                slot_reuse_constraints.append(constraint)
+                            debug_load_slot_choice(
+                                "allow_low_guard_repeated_store_no_overlap",
+                                candidate_offset=addr,
+                                future_idx=future_idx,
+                                future_addr=str(future_addr_symbol),
+                            )
+                            continue
+                        debug_load_slot_choice(
+                            "low_guard_repeated_after_store",
+                            candidate_offset=addr,
+                            future_idx=future_idx,
+                            future_addr=str(future_addr_symbol),
+                        )
+                        return True
                     return False
 
                 return (
                     len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
                     and inst.width == 8
+                    and addr > STACK_RANGE - LIVEIN_STORE_LOW_GUARD_OFFSET
                     and (
                         prior_store_may_clobber_current_slot()
                         or (
@@ -20171,7 +20234,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             and future_same_addr_reused_after_store()
                         )
                     )
-                    and addr > STACK_RANGE - LIVEIN_STORE_LOW_GUARD_OFFSET
                 )
 
             def choose_low_guard_fallback_addr():
@@ -20214,6 +20276,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
             def commit_load_addr_constraint(addr, timeout_ms=None):
                 def remember_committed_addr_offset():
+                    low_guard_reuse_proven_offsets.add(addr)
                     remember_equiv_base_offset(addr_symbol, addr)
                     addr_affine = affine_key(addr_symbol)
                     if addr_affine is not None:
@@ -20227,7 +20290,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         candidate_offset=addr,
                     )
                     return False
-                if low_guard_prior_store_conflict(addr):
+                slot_reuse_constraints = []
+                if low_guard_prior_store_conflict(addr, slot_reuse_constraints):
                     debug_load_slot_choice(
                         "reject_low_guard_prior_store",
                         candidate_offset=addr,
@@ -20241,7 +20305,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if hard_slot_type_load and existing_slot_conflicts_with_current(addr):
                     debug_load_slot_choice("reject_slot_conflict", candidate_offset=addr)
                     return False
-                slot_reuse_constraints = []
                 if not candidate_keeps_affine_group_available(
                     addr,
                     slot_reuse_constraints,
