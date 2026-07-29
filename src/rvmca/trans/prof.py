@@ -2548,6 +2548,123 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             load_idx,
         )
 
+    def stored_value_for_load_expr(store_data_symbol, store_width, load_inst):
+        if store_width < load_inst.width:
+            return None
+        if load_inst.name == 'ld':
+            return store_data_symbol
+        if load_inst.name == 'lw':
+            return claripy.SignExt(32, store_data_symbol[31:0])
+        if load_inst.name == 'lwu':
+            return claripy.ZeroExt(32, store_data_symbol[31:0])
+        if load_inst.name == 'lh':
+            return claripy.SignExt(48, store_data_symbol[15:0])
+        if load_inst.name == 'lhu':
+            return claripy.ZeroExt(48, store_data_symbol[15:0])
+        if load_inst.name == 'lb':
+            return claripy.SignExt(56, store_data_symbol[7:0])
+        if load_inst.name == 'lbu':
+            return claripy.ZeroExt(56, store_data_symbol[7:0])
+        return None
+
+    def forwarded_load_cancels_pointer_residual(
+        load_inst,
+        rd_symbol,
+        load_addr_symbol,
+        load_idx,
+        consumer_addr,
+    ):
+        load_addr_key = str(claripy.simplify(load_addr_symbol))
+        prior_store = None
+        for store_entry in reversed(store_accesses):
+            _, store_addr_symbol, store_idx, _, _ = store_entry
+            if store_idx >= load_idx:
+                continue
+            if str(claripy.simplify(store_addr_symbol)) == load_addr_key:
+                prior_store = store_entry
+                break
+        if prior_store is None:
+            return False
+        _, _, prior_store_idx, store_width, store_data_symbol = prior_store
+        stored_expr = stored_value_for_load_expr(
+            store_data_symbol,
+            store_width,
+            load_inst,
+        )
+        if stored_expr is None:
+            return False
+
+        rd_vars = set(getattr(rd_symbol, 'variables', set()))
+        residual = claripy.simplify(consumer_addr - rd_symbol)
+        residual_vars = set(getattr(residual, 'variables', set()))
+        stored_vars = set(getattr(stored_expr, 'variables', set()))
+        shared_vars = stored_vars & residual_vars
+        if not shared_vars:
+            return False
+        combined_addr = claripy.simplify(
+            claripy.replace_dict(
+                consumer_addr,
+                {rd_symbol.hash(): stored_expr},
+            )
+        )
+        combined_vars = set(getattr(combined_addr, 'variables', set()))
+        if combined_vars & (rd_vars | shared_vars):
+            return False
+
+        for _, other_store_addr, other_store_idx, other_store_width, _ in store_accesses:
+            if not (prior_store_idx < other_store_idx < load_idx):
+                continue
+            address_delta = concrete_expr_value(
+                claripy.simplify(other_store_addr - load_addr_symbol)
+            )
+            if address_delta is not None:
+                signed_delta = _signed_u64(address_delta)
+                if (
+                    signed_delta >= load_inst.width
+                    or signed_delta + other_store_width <= 0
+                ):
+                    continue
+                return False
+
+            overlap_solver = base_solver.branch()
+            overlap_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
+            overlap_conditions = [
+                other_store_addr + store_byte == load_addr_symbol + load_byte
+                for store_byte in range(other_store_width)
+                for load_byte in range(load_inst.width)
+            ]
+            try:
+                overlap_solver.add(claripy.Or(*overlap_conditions))
+                if overlap_solver.satisfiable():
+                    return False
+            except Exception:
+                return False
+
+        for carrier_reg in regs_undefined:
+            carrier_symbol = reg_to_symbol.get(carrier_reg)
+            carrier_vars = set(getattr(carrier_symbol, 'variables', set()))
+            if not carrier_vars or not (combined_vars & carrier_vars):
+                continue
+            carrier_residual = claripy.simplify(
+                combined_addr - carrier_symbol
+            )
+            if set(getattr(carrier_residual, 'variables', set())) & carrier_vars:
+                continue
+            has_independent_direct_use = any(
+                getattr(other_inst, 'rs1', None) == carrier_reg
+                and not (
+                    set(getattr(other_addr, 'variables', set())) & rd_vars
+                )
+                and concrete_expr_value(
+                    claripy.simplify(other_addr - carrier_symbol)
+                )
+                is not None
+                for other_inst, other_addr, _, _ in mem_accesses
+            )
+            if has_independent_direct_use:
+                return True
+        return False
+
     # For every later memory address that depends on loaded data, choose one
     # additive 64-bit load as the stack-relative anchor.  This keeps composite
     # addresses position-independent instead of letting scalar operands encode
@@ -2561,6 +2678,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 continue
             rd_vars = getattr(rd_symbol, 'variables', set())
             if not rd_vars or not (addr_vars & rd_vars):
+                continue
+            if forwarded_load_cancels_pointer_residual(
+                load_inst,
+                rd_symbol,
+                load_addr_symbol,
+                load_idx,
+                addr_symbol,
+            ):
+                sp_affine_candidates.append(
+                    (load_idx, load_inst, rd_symbol, load_addr_symbol)
+                )
                 continue
             residual = claripy.simplify(addr_symbol - rd_symbol)
             if getattr(residual, 'variables', set()) & rd_vars:
@@ -2696,25 +2824,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if store_idx < inst_idx and forced_same_address(store_addr_symbol, addr_symbol, solver):
                 return True
         return False
-
-    def stored_value_for_load_expr(store_data_symbol, store_width, load_inst):
-        if store_width < load_inst.width:
-            return None
-        if load_inst.name == 'ld':
-            return store_data_symbol
-        if load_inst.name == 'lw':
-            return claripy.SignExt(32, store_data_symbol[31:0])
-        if load_inst.name == 'lwu':
-            return claripy.ZeroExt(32, store_data_symbol[31:0])
-        if load_inst.name == 'lh':
-            return claripy.SignExt(48, store_data_symbol[15:0])
-        if load_inst.name == 'lhu':
-            return claripy.ZeroExt(48, store_data_symbol[15:0])
-        if load_inst.name == 'lb':
-            return claripy.SignExt(56, store_data_symbol[7:0])
-        if load_inst.name == 'lbu':
-            return claripy.ZeroExt(56, store_data_symbol[7:0])
-        return None
 
     store_pointer_required_varsets = []
     store_pointer_required_min_offsets = []

@@ -173,6 +173,65 @@ def test_prior_store_is_forwarded_into_failing_address_sum(tmp_path):
     _assert_profiled_program_runs(asm_path)
 
 
+def test_forwarded_load_residual_cancellation_keeps_direct_stack_carrier(tmp_path):
+    asm_path = tmp_path / "forwarded_load_residual_cancellation.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "slli a5,a3,0x2",
+                "sub a5,a5,s11",
+                "sd a5,136(sp)",
+                "sd a2,248(sp)",
+                "sd a3,256(sp)",
+                "addi a5,s11,0",
+                "lui a1,0x71e",
+                "addi a1,a1,1976",
+                "add t5,a1,a5",
+                "lui a1,0x71f",
+                "addi a1,a1,-2040",
+                "add a1,a1,a5",
+                "lw t6,-4(a1)",
+                "lui a1,0x71f",
+                "lw t0,-4(t5)",
+                "ld s0,8(sp)",
+                "addi a1,a1,-1960",
+                "add a1,a1,a5",
+                "lw t5,-4(a1)",
+                "ld s10,16(sp)",
+                "ld a1,136(sp)",
+                "addw t0,t0,s0",
+                "lui s0,0x1",
+                "addi s0,s0,-1896",
+                "add a1,a1,a5",
+                "addw t6,t6,s10",
+                "add s0,sp,s0",
+                "ld s10,24(sp)",
+                "add s0,s0,a1",
+                "sw t0,0(s0)",
+                "add t0,sp,a1",
+                "lui s0,0x1",
+                "addw t5,t5,s10",
+                "sw t4,1360(t0)",
+                "addi s10,sp,640",
+                "addi t0,s0,-1696",
+                "addi s0,s0,-856",
+                "add t0,t0,s10",
+                "add s0,s0,s10",
+                "add t0,t0,a1",
+                "add a1,s0,a1",
+                "sw t5,0(a1)",
+                "ld a1,128(sp)",
+                "sw t6,0(t0)",
+                "addi a5,a5,4",
+                "addiw t4,t4,21",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)
+
+
 def test_repeated_pointer_source_slot_survives_intervening_stores(tmp_path):
     asm_path = tmp_path / "repeated_pointer_source_store_chain.S"
     asm_path.write_text(
