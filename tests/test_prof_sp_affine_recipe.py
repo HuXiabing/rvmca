@@ -473,6 +473,66 @@ def test_affine_quotient_supports_two_independent_scaled_liveins(tmp_path):
             path.unlink(missing_ok=True)
 
 
+def test_affine_quotient_initializes_livein_scratch_register_last(tmp_path):
+    asm_path = tmp_path / "affine_quotient_livein_x27_last.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addi a5,zero,380",
+                "mul a0,a0,a5",
+                "lui a2,0x54a",
+                "addi s0,a2,-624",
+                "mul a5,s11,a5",
+                "add a0,s0,a0",
+                "lw s1,4(a0)",
+                "add a5,s0,a5",
+                "lw s2,4(a5)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        first_recipe = "divu x10, x10, x27"
+        scratch_recipe = "divu x27, x27, x31"
+        assert first_recipe in init_asm
+        assert scratch_recipe in init_asm
+        assert init_asm.index(first_recipe) < init_asm.index(scratch_recipe)
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
 def test_affine_quotient_handles_add_before_power_of_two_scale(tmp_path):
     asm_path = tmp_path / "affine_quotient_add_then_shift.S"
     asm_path.write_text(

@@ -923,6 +923,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if reg in XREG and reg not in regs_defined and reg not in regs_undefined:
                     regs_undefined.append(reg)
 
+    runtime_recipe_temp_regs = (
+        find_reg_by_name(TEMP_REG),
+        find_reg_by_name(TEMP_REG2),
+    )
+
+    def runtime_recipe_scratch_unavailable():
+        return all(reg in regs_undefined for reg in runtime_recipe_temp_regs)
+
     # add dummy checking for undefined registers to avoid unconstrained symbol(regs_undefined>0)
     prog2se = add_undef_reg_checking(prog2se, list(regs_undefined))
     # print("prog2se",prog2se)
@@ -6319,6 +6327,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             force_affine_quotient=None,
             allow_scaled_stack=False,
         ):
+            target_reg = find_reg_by_name(reg_name)
+            alternate_scratch = (
+                TEMP_REG
+                if target_reg == find_reg_by_name(TEMP_REG2)
+                else TEMP_REG2
+            )
             if force_affine_quotient is not None:
                 recipe_kind = force_affine_quotient[0]
                 if recipe_kind == 'affine_linear':
@@ -6328,7 +6342,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         raise ValueError(
                             f"invalid affine linear coefficient: {coefficient}"
                         )
-                    scratch = TEMP_REG2 if reg_name != TEMP_REG2 else TEMP_REG
+                    scratch = alternate_scratch
                     insts.append(UFmtInst('li', reg_name, CONCRETE_REPLAY_SP))
                     insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
                     if abs(coefficient) > 1:
@@ -6348,7 +6362,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     raise ValueError(
                         f"invalid runtime register recipe: {force_affine_quotient!r}"
                     )
-                scratch = TEMP_REG2 if reg_name != TEMP_REG2 else TEMP_REG
+                scratch = alternate_scratch
                 insts.append(UFmtInst('li', reg_name, abs(offset)))
                 if offset >= 0:
                     insts.append(RFmtInst('sub', reg_name, 'sp', reg_name))
@@ -10354,10 +10368,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return scale, const & mask, constraints
 
         def fixed_sp_affine_quotient_compatible(addr_symbol, access_offset):
-            if (
-                find_reg_by_name(TEMP_REG) in regs_undefined
-                or find_reg_by_name(TEMP_REG2) in regs_undefined
-            ):
+            if runtime_recipe_scratch_unavailable():
                 return True
             mask = (1 << 64) - 1
             for reg in regs_undefined:
@@ -10516,8 +10527,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 divisor, const, multiplier, shifted_constraints = shifted
                 runtime_accesses = []
                 runtime_recipe_eligible = (
-                    find_reg_by_name(TEMP_REG) not in regs_undefined
-                    and find_reg_by_name(TEMP_REG2) not in regs_undefined
+                    not runtime_recipe_scratch_unavailable()
                 )
                 group_requirements = []
                 for other_inst, other_addr_symbol, other_idx, other_width in mem_accesses:
@@ -10762,8 +10772,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
                 runtime_recipe_eligible = (
                     runtime_stable_constraints(scaled_constraints)
-                    and find_reg_by_name(TEMP_REG) not in regs_undefined
-                    and find_reg_by_name(TEMP_REG2) not in regs_undefined
+                    and not runtime_recipe_scratch_unavailable()
                 )
                 # The expression proof must cover every address affected by
                 # this live-in.  A partial recipe would relocate only some of
@@ -18558,7 +18567,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def rebuild_register_init():
             rebuilt = []
-            for reg in regs_undefined:
+            ordered_regs = [
+                reg for reg in regs_undefined
+                if reg not in runtime_recipe_temp_regs
+            ] + [
+                reg for reg in regs_undefined
+                if reg in runtime_recipe_temp_regs
+            ]
+            for reg in ordered_regs:
                 if reg not in reg_values:
                     continue
                 append_value_init(
@@ -21953,10 +21969,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 materialize_register(r)
 
         def install_linear_runtime_register_recipes():
-            if (
-                find_reg_by_name(TEMP_REG) in regs_undefined
-                or find_reg_by_name(TEMP_REG2) in regs_undefined
-            ):
+            if runtime_recipe_scratch_unavailable():
                 return
 
             translation_delta = claripy.BVS(
