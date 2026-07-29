@@ -460,6 +460,14 @@ def add_addr_range_checking(prog: Program, temp_reg: str = None) -> Program:
     return prog
 
 
+def _riscv_u_format_value(imm: int) -> int:
+    """Return the sign-extended value produced by a RISC-V U immediate."""
+    imm &= (1 << 20) - 1
+    if imm & (1 << 19):
+        imm -= 1 << 20
+    return imm << 12
+
+
 def fix_lui_auipc_imm(prog: Program) -> Program:
     """Rebase related lui/auipc immediates without destroying differences.
 
@@ -492,6 +500,9 @@ def fix_lui_auipc_imm(prog: Program) -> Program:
         return imm - (1 << imm_bits) if imm & imm_sign else imm
 
     inst_to_idx = {id(inst): idx for idx, inst in enumerate(u_insts)}
+    lui_source_indices = {
+        idx for idx, inst in enumerate(u_insts) if inst.name == 'lui'
+    }
     parents = list(range(len(u_insts)))
 
     def find(idx):
@@ -509,35 +520,58 @@ def fix_lui_auipc_imm(prog: Program) -> Program:
                 parents[rhs] = lhs
 
     reg_sources = {}
+    reg_dynamic = {XREG[0]: False}
+    arithmetic_literal_sources = set()
+
+    def is_dynamic(reg):
+        # A register read before its first definition is a live-in.
+        return reg_dynamic.get(reg, reg != XREG[0])
+
     for inst in prog.insts:
         if id(inst) in inst_to_idx:
             reg_sources[inst.rd] = {inst_to_idx[id(inst)]}
+            reg_dynamic[inst.rd] = False
             continue
 
         if inst.type in {IType.Load, IType.Store, IType.Amo}:
-            union(reg_sources.get(inst.rs1, set()))
+            union(
+                reg_sources.get(inst.rs1, set())
+                - arithmetic_literal_sources
+            )
             defined = inst.get_def()
             if defined is not None:
                 reg_sources[defined] = set()
+                reg_dynamic[defined] = True
             continue
 
         if isinstance(inst, RFmtInst):
+            rs1_sources = set(reg_sources.get(inst.rs1, set()))
+            rs2_sources = set(reg_sources.get(inst.rs2, set()))
+            if inst.name in {'mulh', 'mulhsu', 'mulhu'}:
+                if rs1_sources and not is_dynamic(inst.rs1) and is_dynamic(inst.rs2):
+                    arithmetic_literal_sources.update(rs1_sources & lui_source_indices)
+                if rs2_sources and not is_dynamic(inst.rs2) and is_dynamic(inst.rs1):
+                    arithmetic_literal_sources.update(rs2_sources & lui_source_indices)
             reg_sources[inst.rd] = (
-                set(reg_sources.get(inst.rs1, set()))
-                | set(reg_sources.get(inst.rs2, set()))
+                rs1_sources | rs2_sources
             )
+            reg_dynamic[inst.rd] = is_dynamic(inst.rs1) or is_dynamic(inst.rs2)
             continue
 
         if isinstance(inst, IFmtInst):
             reg_sources[inst.rd] = set(reg_sources.get(inst.rs1, set()))
+            reg_dynamic[inst.rd] = is_dynamic(inst.rs1)
             continue
 
         defined = inst.get_def()
         if defined is not None:
             reg_sources[defined] = set()
+            reg_dynamic[defined] = True
 
     groups = {}
     for idx, inst in enumerate(u_insts):
+        if idx in arithmetic_literal_sources:
+            continue
         groups.setdefault(find(idx), []).append(inst)
 
     for group in groups.values():
@@ -1634,9 +1668,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return unsupported(inst_idx, inst, 'ifmt')
             elif isinstance(inst, UFmtInst):
                 if inst.name == 'lui':
-                    value = inst.imm << 12
+                    value = _riscv_u_format_value(inst.imm)
                 elif inst.name == 'auipc':
-                    value = begin_addr + inst_idx * 4 + (inst.imm << 12)
+                    value = begin_addr + inst_idx * 4 + _riscv_u_format_value(inst.imm)
                 elif inst.name == 'li':
                     value = inst.imm
                 else:
@@ -2113,7 +2147,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     def original_access_addr(inst_idx):
         return begin_addr + inst_idx * 4
 
-    has_symbolic_mul = any(inst.name in {'mul', 'mulw'} for inst in prog2se.insts)
+    has_symbolic_mul = any(
+        inst.name in {'mul', 'mulw', 'mulh', 'mulhsu', 'mulhu'}
+        for inst in prog2se.insts
+    )
     use_static_memory_collection = (
         len(access_insts) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
         or (has_symbolic_mul and len(access_insts) >= 2)
@@ -2235,6 +2272,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             for node in list(static_iter_ast_nodes(expr)):
                 if getattr(node, 'op', None) not in {'__mul__', 'Mul'}:
                     continue
+                if node.size() != result.size():
+                    continue
                 node_vars = static_ast_vars(node)
                 if not node_vars:
                     continue
@@ -2253,6 +2292,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
         def zero_extend_32(expr):
             return claripy.ZeroExt(32, expr[31:0])
+
+        def high_mul(lhs, rhs, lhs_signed, rhs_signed):
+            lhs_ext = (
+                claripy.SignExt(64, lhs)
+                if lhs_signed
+                else claripy.ZeroExt(64, lhs)
+            )
+            rhs_ext = (
+                claripy.SignExt(64, rhs)
+                if rhs_signed
+                else claripy.ZeroExt(64, rhs)
+            )
+            return (lhs_ext * rhs_ext)[127:64]
 
         def load_value(inst, inst_idx):
             if inst.name == 'ld':
@@ -2292,6 +2344,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     record_static_mul_zero_constraint(sign_extend_32(lhs * rhs), (lhs, rhs))
                     return bvv(0)
                 return sign_extend_32(lhs * rhs)
+            if inst.name == 'mulh':
+                return high_mul(lhs, rhs, lhs_signed=True, rhs_signed=True)
+            if inst.name == 'mulhsu':
+                return high_mul(lhs, rhs, lhs_signed=True, rhs_signed=False)
+            if inst.name == 'mulhu':
+                return high_mul(lhs, rhs, lhs_signed=False, rhs_signed=False)
             if inst.name == 'and':
                 return lhs & rhs
             if inst.name == 'or':
@@ -2371,7 +2429,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if inst.name == 'li':
                     set_reg(inst.rd, bvv(inst.imm))
                 elif inst.name == 'lui':
-                    set_reg(inst.rd, bvv(inst.imm << 12))
+                    set_reg(inst.rd, bvv(_riscv_u_format_value(inst.imm)))
 
         _write_profile_stage(name, "init:symbolic_memory_access_collection:done")
         return claripy.Solver()
