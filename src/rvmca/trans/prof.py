@@ -2622,7 +2622,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return min_offset
 
         def derived_access_ranges(base_offset):
-            ranges = [(base_offset, 8)]
+            ranges = [(base_offset, 8, False)]
             for access_inst, access_addr_symbol, access_idx, access_width in mem_accesses:
                 if access_idx <= producer_idx:
                     continue
@@ -2634,7 +2634,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return None
                 if access_width > 1 and access_offset % access_width:
                     return None
-                ranges.append((access_offset, access_width))
+                ranges.append((
+                    access_offset,
+                    access_width,
+                    access_inst.type == IType.Load,
+                ))
             return ranges
 
         for offset in range(max(0, min_offset), STACK_RANGE + 1):
@@ -2643,7 +2647,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 continue
             if any(
                 concrete_ranges_overlap(access_offset, access_width, avoid_offset, avoid_width)
-                for access_offset, access_width in ranges
+                and not (
+                    read_only
+                    and access_offset == avoid_offset
+                    and access_width == avoid_width
+                )
+                for access_offset, access_width, read_only in ranges
                 for avoid_offset, avoid_width in avoid_ranges
             ):
                 continue
@@ -12963,12 +12972,37 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 pointer_candidate_alias_offset_cache[cache_key] = result
                 return result
 
-            def used_slot_aliases_related_access(used_offset, related_addr_symbol):
+            def used_slot_aliases_related_access(
+                used_offset,
+                related_addr_symbol,
+                proof_constraints=None,
+            ):
                 used_word_offset = ((used_offset + 7) // 8) * 8
-                return any(
+                known_addrs = mem_offset_addr_symbols.get(used_word_offset, [])
+                if any(
                     same_address(related_addr_symbol, known_addr, allow_solver=False)
-                    for known_addr in mem_offset_addr_symbols.get(used_word_offset, [])
-                )
+                    for known_addr in known_addrs
+                ):
+                    return True
+                if not proof_constraints:
+                    return False
+                for known_addr in known_addrs:
+                    if not exprs_may_be_related(related_addr_symbol, known_addr):
+                        continue
+                    proof_solver = candidate_solver.branch()
+                    proof_solver.timeout = max(local_solver_timeout_ms, 1000)
+                    try:
+                        for constraint in proof_constraints:
+                            proof_solver.add(constraint)
+                        if not proof_solver.satisfiable():
+                            continue
+                        inequality_solver = proof_solver.branch()
+                        inequality_solver.add(related_addr_symbol != known_addr)
+                        if not inequality_solver.satisfiable():
+                            return True
+                    except Exception:
+                        continue
+                return False
 
             def unique_current_value_for_expr(expr, timeout_ms=None):
                 timeout_ms = max(local_solver_timeout_ms, 1000) if timeout_ms is None else timeout_ms
@@ -13327,6 +13361,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 and used_slot_aliases_related_access(
                                     used_offset,
                                     related_addr_symbol,
+                                    list(related_constraints) + [
+                                        val_symbol == expr_bvv(actual_value, val_symbol),
+                                    ],
                                 )
                             ):
                                 continue
@@ -13640,7 +13677,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     and access_slot_width == used_width
                                     and (
                                         access_inst.type != IType.Store
-                                        or used_slot_aliases_related_access(used_offset, access_addr_symbol)
+                                        or used_slot_aliases_related_access(
+                                            used_offset,
+                                            access_addr_symbol,
+                                        )
                                     )
                                 ):
                                     continue
@@ -13813,7 +13853,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 and related_width == used_width
                                 and (
                                     related_inst.type != IType.Store
-                                    or used_slot_aliases_related_access(used_offset, related_addr_symbol)
+                                    or used_slot_aliases_related_access(
+                                        used_offset,
+                                        related_addr_symbol,
+                                    )
                                 )
                             ):
                                 continue
@@ -13837,7 +13880,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     )
                     if access_slot_offset != word_offset or access_slot_width != 8:
                         return False
-                    return used_slot_aliases_related_access(word_offset, access_addr_symbol)
+                    return used_slot_aliases_related_access(
+                        word_offset,
+                        access_addr_symbol,
+                    )
 
                 def residual_forced_to_target(residual, target):
                     values = solver_eval_limited(residual, n=2, timeout_ms=100)

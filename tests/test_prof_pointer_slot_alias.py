@@ -248,3 +248,104 @@ def test_repeated_pointer_source_slot_survives_intervening_stores(tmp_path):
         encoding="utf-8",
     )
     _assert_profiled_program_runs(asm_path)
+
+
+def test_many_large_relative_pointer_stores_use_range_checked_candidates(tmp_path):
+    asm_path = tmp_path / "many_large_relative_pointer_stores.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a3,8(sp)",
+                "ld a1,16(sp)",
+                "addi a2,zero,4",
+                "sd a3,1784(a5)",
+                "ld a5,0(s1)",
+                "addi a3,zero,1",
+                "add a5,a5,a4",
+                "sd a1,1792(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a3,1776(a5)",
+                "ld a5,0(s1)",
+                "ld a3,40(sp)",
+                "add a5,a5,a4",
+                "sd s11,1808(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a3,1816(a5)",
+                "ld a5,0(s1)",
+                "ld a3,0(sp)",
+                "add a5,a5,a4",
+                "sd s9,1800(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a3,1832(a5)",
+                "ld a5,0(s1)",
+                "ld a3,24(sp)",
+                "add a5,a5,a4",
+                "sd a3,1840(a5)",
+                "ld a5,0(s1)",
+                "ld a3,56(sp)",
+                "add a5,a5,a4",
+                "sd s5,1824(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a3,1744(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a2,1768(a5)",
+                "ld t1,0(s1)",
+                "lui a2,0x2",
+                "add a5,t1,a2",
+                "ld a4,1832(a5)",
+                "ld s2,1840(a5)",
+                "ld a7,1736(a5)",
+                "ld s3,1744(a5)",
+                "ld t4,1784(a5)",
+                "ld t0,1792(a5)",
+                "ld s0,1808(a5)",
+                "ld t6,1816(a5)",
+                "ld a6,1776(a5)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)
+
+
+def test_repeated_pointer_source_supports_large_indirect_base(tmp_path):
+    asm_path = tmp_path / "repeated_pointer_large_indirect_base.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "sd s11,-1752(a5)",
+                "ld a5,0(s1)",
+                "ld a1,40(sp)",
+                "addi a3,zero,1",
+                "add a5,a5,a4",
+                "sd a1,-1744(a5)",
+                "ld a5,0(s1)",
+                "addi a2,zero,4",
+                "add a5,a5,a4",
+                "sd a3,-1760(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd s7,-1792(a5)",
+                "ld a5,0(s1)",
+                "add a5,a5,a4",
+                "sd a2,-1768(a5)",
+                "ld t1,0(s1)",
+                "lui a7,0x3",
+                "add a5,t1,a7",
+                "ld a4,-1752(a5)",
+                "ld a2,-1744(a5)",
+                "ld t3,-1800(a5)",
+                "ld a1,-1792(a5)",
+                "ld a0,-1760(a5)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)

@@ -1105,3 +1105,92 @@ FAIL                              0
 SKIP                              0
 regressed                         0
 ```
+
+## Post-1809 Repair: Read-Only Pointer Slots and Proven Store/Load Aliases
+
+The remaining WRF representatives had two related but distinct conservative
+rejections.
+
+For `481.wrf_319`, a pointer source was initialized in a stack slot and a later
+load read exactly the same offset and width.  The minimum pointer-offset scan
+treated every overlap as a possible overwrite, including this read-only exact
+alias, and raised the minimum past a legal candidate.  The scan now records
+whether each derived access is a load.  It permits only an exact-offset,
+exact-width read of the protected range; stores and partial overlaps remain
+rejected.
+
+The other nine blocks repeatedly load a pointer, use a large indirect base for
+stores, and later load the stored fields through a constant `lui` base.  For
+example, a candidate in `481.wrf_350` derives a store slot at offset 2776,
+which is also the already allocated slot for the corresponding later load.
+The old overlap check used only cheap symbolic address equality and therefore
+rejected the legal alias before the candidate value and residual constraints
+were committed.
+
+The new overlap path remains fail-closed.  It first requires the complete
+candidate proof constraints to be satisfiable, then asks whether making the
+store address different from an address already assigned to that exact load
+slot is unsatisfiable.  Slot reuse is allowed only after that proof succeeds;
+solver timeout, unknown, an unsatisfiable candidate, different widths, partial
+overlap, or a satisfiable inequality all retain the old rejection.  Concrete
+replay, stack-range checks, assembly, and real QEMU/pp validation are
+unchanged.
+
+The structural regression file now contains both full instruction shapes and
+requires a real QEMU/pp cycle result.  The focused test result was:
+
+```text
+tests/test_prof_pointer_slot_alias.py  7 passed in 144.08s
+```
+
+The first change converted `481.wrf_319` to PASS while the other nine still
+failed at `init:materialize_init:memory_values:slot`.  With the exact alias
+proof, the same 10-ID set completed as 10/10 PASS with no FAIL, SKIP, or
+timeout.  The previous repeated-source 20-ID benefit set was also rerun and
+remained 20/20 PASS.  The reports and frozen candidate set are:
+
+```text
+tests/failure_reports/spec06_wrf_read_alias_candidate10_current_300/status.json
+tests/failure_reports/spec06_wrf_read_alias_candidate10_forced_alias_300/status.json
+tests/failure_reports/spec06_wrf_repeated_source_pass20_forced_alias_status_300/status.json
+tests/failure_reports/id_sets/spec06_wrf_read_alias_candidate10.ids
+```
+
+The final profiler SHA-256 for this round is:
+
+```text
+a9887c0a28c05a7f9c2ca18868962572b4344739f520ad9b46bb16ccf10b9371
+```
+
+The prior 1,809 benefit IDs are unique across their 11 frozen ID sets.  Their
+intersection with this 10-ID set is empty, and the combined union contains
+exactly 1,819 IDs.  Conservative accounting is therefore:
+
+```text
+previously confirmed original failed -> PASS   1809
+new read-only/forced-alias PASS                   10
+confirmed original failed -> PASS               1819
+1819 / 2375                                    76.59%
+original failed -> SKIP counted as benefit          0
+```
+
+The exact historical hard gate used two workers and a 300-second per-block
+budget.  It completed in 6,437.6 seconds with 2,020 PASS, zero ordinary FAIL,
+zero SKIP, and only the known budget-sensitive `456.hmmer_402` timeout.  With
+the identical profiler, that block completed the full validation path as PASS
+in 287.0 seconds using one worker and a 600-second budget.  The reports are:
+
+```text
+tests/failure_reports/legacy2021_forced_store_load_alias_300.json
+tests/failure_reports/legacy_hmmer402_forced_store_load_alias_600.json
+```
+
+Exact-ID reconciliation is:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+FAIL                              0
+SKIP                              0
+regressed                         0
+```
