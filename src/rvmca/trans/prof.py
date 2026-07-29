@@ -11180,7 +11180,16 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     return None
                 scale, const, constraints = scaled
                 if constraints:
-                    return None
+                    implication_solver = candidate_solver.branch()
+                    implication_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
+                    try:
+                        implication_solver.add(
+                            claripy.Not(claripy.And(*constraints))
+                        )
+                        if implication_solver.satisfiable():
+                            return None
+                    except Exception:
+                        return None
                 related_accesses.append((addr_symbol, width, scale, _signed_u64(const)))
             if not related_accesses:
                 return None

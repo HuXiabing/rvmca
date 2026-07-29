@@ -252,6 +252,68 @@ def test_large_power_of_two_loaded_value_uses_runtime_quotient(tmp_path):
             path.unlink(missing_ok=True)
 
 
+def test_large_power_of_two_loaded_sum_uses_implied_zero_livein(tmp_path):
+    asm_path = tmp_path / "large_power_of_two_loaded_sum_quotient.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld t0,24(sp)",
+                "add a0,a0,t0",
+                "lui t1,0x321",
+                "slli a0,a0,0x6",
+                "addi t1,t1,-320",
+                "add t1,t1,a0",
+                "lw a1,0(t1)",
+                "lui a2,0x456",
+                "addi a2,a2,768",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "li x27, 0x40" in init_asm
+        assert "divu x31, x31, x27" in init_asm
+        assert "li x10, 0x0" in init_asm
+
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
 def test_affine_quotient_loaded_value_keeps_related_accesses_safe(tmp_path):
     asm_path = tmp_path / "affine_quotient_loaded_mul_104_group.S"
     asm_path.write_text(
