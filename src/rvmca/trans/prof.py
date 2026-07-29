@@ -19458,23 +19458,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         for required_vars in store_pointer_required_varsets:
             forwarded_store_required_pointer_vars.update(required_vars)
 
-        def forwarded_pointer_has_multiplicative_store_carrier(value_expr, producer_idx):
-            value_vars = expr_vars(value_expr)
-            if not value_vars:
-                return False
-            for _, _, store_idx, store_width, store_data_symbol in store_accesses:
-                if store_idx <= producer_idx or store_width < 8:
-                    continue
-                if not (expr_vars(store_data_symbol) & value_vars):
-                    continue
-                for node in iter_ast_nodes(store_data_symbol):
-                    if getattr(node, 'op', None) not in {'__mul__', 'Mul'}:
-                        continue
-                    for arg in getattr(node, 'args', ()):
-                        if hasattr(arg, 'op') and (expr_vars(arg) & value_vars):
-                            return True
-            return False
-
         def forwarded_pointer_carrier_constraints(value_expr, producer_idx):
             value_vars = expr_vars(value_expr)
             if not value_vars:
@@ -21555,7 +21538,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 value_feeds_forwarded_pointer
                 and not value_feeds_forwarded_address_scalar
                 and not value_is_scaled_address_scalar
-                and forwarded_pointer_has_multiplicative_store_carrier(value_expr, inst_idx)
             ):
                 forwarded_carrier = forwarded_pointer_carrier_constraints(
                     value_expr,

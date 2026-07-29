@@ -173,6 +173,36 @@ def test_prior_store_is_forwarded_into_failing_address_sum(tmp_path):
     _assert_profiled_program_runs(asm_path)
 
 
+def test_additive_store_forwarded_pointer_zeros_livein_residual(tmp_path):
+    asm_path = tmp_path / "additive_store_forwarded_pointer.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a3,0(s0)",
+                "lui a4,0x68f10",
+                "addi a4,a4,-1",
+                "ld a5,8(a3)",
+                "lui a2,0x4040",
+                "add a5,a5,s1",
+                "sd a5,8(a3)",
+                "ld a3,0(s0)",
+                "ld a5,0(a3)",
+                "ld a3,8(a3)",
+                "add a5,a5,a3",
+                "sb zero,0(a5)",
+                "lw a5,12(s0)",
+                "lbu a3,552(gp)",
+                "and a5,a5,a4",
+                "or a5,a5,a2",
+                "sw a5,12(s0)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)
+
+
 def test_forwarded_load_residual_cancellation_keeps_direct_stack_carrier(tmp_path):
     asm_path = tmp_path / "forwarded_load_residual_cancellation.S"
     asm_path.write_text(
