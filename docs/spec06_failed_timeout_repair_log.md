@@ -1007,3 +1007,101 @@ FAIL                              0
 SKIP                              0
 regressed                         0
 ```
+
+## Post-1761 Repair: Repeated Pointer-Source Slot Lifetime
+
+Representative `481.wrf_484` repeatedly loads a pointer from `0(s1)`. The
+old replay repair protected the initialized slot only from the final pointer
+load to that load's last address use. An earlier store could therefore be
+materialized on top of the slot. A later reload then read the stored scalar
+instead of the pointer and failed alternate-SP concrete replay, despite a
+legal initial state existing.
+
+The repair groups same-width loads with the same symbolic source address. For
+a repeated source it begins the protected lifetime at the first such load,
+uses the first reachable prefix state to locate the concrete source slot, and
+adds byte-accurate non-overlap constraints for every intervening store. A
+store whose address is solver-proven equal to the source remains available to
+the existing store-forwarding path. Replay range checks, assembly, and the
+real QEMU/pp measurement are unchanged, and no block ID is consulted by the
+implementation.
+
+The final profiler SHA-256 for this round is:
+
+```text
+4db11af1abe37fafcc79f41329128947ad91a6d7c975e6d9e8c02d93bebbcb10
+```
+
+The structural regression test contains the full repeated-load/store shape
+and requires a real QEMU/pp cycle result. The final focused run reported:
+
+```text
+tests/test_prof_pointer_slot_alias.py  5 passed in 112.73s
+```
+
+A 55-ID WRF scan with the repaired profiler produced 38 PASS and 17 FAIL,
+with no SKIP or timeout. This broad scan was used only for discovery. A clean
+`d1304d8` A/B run then isolated 22 candidates: 20 were `replay_failed`, one
+had an unrelated materialization failure (`481.wrf_1655`), and one already
+passed (`481.wrf_1709`). Only the exact 20 old replay failures are attributed
+to this repair. All 20 passed with the repaired profiler, and an independent
+second current-profiler run again reported 20/20 PASS.
+
+The reports and frozen attributed ID set are:
+
+```text
+tests/failure_reports/spec06_wrf_repeated_source_unconfirmed55_candidate/status.json
+tests/failure_reports/spec06_wrf_repeated_source_candidate22_d1304d8_ab/status.json
+tests/failure_reports/spec06_wrf_repeated_source_pass20_round2_300/status.json
+tests/failure_reports/id_sets/spec06_wrf_repeated_source_pass20.ids
+```
+
+Two earlier WRF checks on the pre-repair profiler had also found 29 original
+failed blocks that were not included in the established 1,761 benefit set.
+They had reported 22 PASS / 1 FAIL and 7/7 PASS. All 29 were rerun with this
+round's final profiler. The current result is 28 PASS and one materialization
+failure (`481.wrf_319`); an isolated single-worker retry reproduced that
+failure in 166.8 seconds. `481.wrf_319` has a prior legal QEMU/pp witness, so
+it remains a fixable target and is neither counted nor reclassified as SKIP.
+
+The current-profiler report and conservative 28-ID set are:
+
+```text
+tests/failure_reports/spec06_wrf_preexisting_pass29_current_slot_300/status.json
+tests/failure_reports/id_sets/spec06_wrf_preexisting_confirmed_pass28.ids
+```
+
+The 1,761 established IDs, 28 current-profiler pre-existing PASS IDs, and 20
+strict A/B benefit IDs have pairwise-empty intersections. Conservative
+current-profiler accounting is therefore:
+
+```text
+established original failed -> PASS             1761
+previously unlogged, current-profiler PASS         28
+strict repeated-source old FAIL -> current PASS    20
+confirmed original failed -> PASS                1809
+1809 / 2375                                    76.17%
+original failed -> SKIP counted as benefit          0
+```
+
+The exact 2,021 historical PASS hard gate used two workers and a 300-second
+per-block budget. It completed in 6,425.2 seconds with 2,020 PASS, zero
+ordinary FAIL, zero SKIP, and only the known budget-sensitive
+`456.hmmer_402` timeout. With the identical profiler, that block completed the
+full transform, replay, assembly, and QEMU/pp path as PASS in 297.6 seconds
+using one worker and a 600-second budget. The reports are:
+
+```text
+tests/failure_reports/legacy2021_repeated_source_slot_candidate_300.json
+tests/failure_reports/legacy_hmmer402_repeated_source_slot_candidate_600.json
+```
+
+Exact-ID reconciliation is:
+
+```text
+required historical PASS IDs  2021
+confirmed PASS                 2021
+FAIL                              0
+SKIP                              0
+regressed                         0
+```

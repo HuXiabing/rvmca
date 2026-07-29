@@ -22152,6 +22152,22 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         )
         for load_inst, rd_symbol, load_addr_symbol, load_idx in pointer_source_loads:
             pointer_vars = getattr(rd_symbol, 'variables', set())
+            load_addr_key = stable_expr_key(load_addr_symbol)
+            same_addr_loads = [
+                entry
+                for entry in mem_entries
+                if (
+                    entry[3] <= load_idx
+                    and entry[0].width == load_inst.width
+                    and stable_expr_key(entry[2]) == load_addr_key
+                )
+            ]
+            first_same_addr_load = min(
+                same_addr_loads,
+                key=lambda entry: entry[3],
+                default=(load_inst, rd_symbol, load_addr_symbol, load_idx),
+            )
+            first_same_addr_inst, _, _, first_same_addr_load_idx = first_same_addr_load
             last_use_idx = load_idx
             for _, addr_symbol, access_idx, _ in mem_accesses:
                 if access_idx <= load_idx:
@@ -22160,14 +22176,32 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     last_use_idx = max(last_use_idx, access_idx)
             if last_use_idx <= load_idx:
                 continue
-            load_addr = original_access_addr(load_idx)
+            load_addr = original_access_addr(first_same_addr_load_idx)
             load_state = prefix_states.get(load_addr) if prefix_states is not None else None
             if load_state is None:
                 continue
-            concrete_load_addr = load_state.solver.eval(getattr(load_state.regs, str(load_inst.rs1))) + load_inst.imm
+            concrete_load_addr = (
+                load_state.solver.eval(
+                    getattr(load_state.regs, str(first_same_addr_inst.rs1))
+                )
+                + first_same_addr_inst.imm
+            )
             concrete_load_offset = (sp_value - concrete_load_addr) & ((1 << 64) - 1)
+            repeated_source = first_same_addr_load_idx < load_idx
             for store_inst, store_addr_symbol, store_idx, store_width, _ in store_accesses:
-                if store_idx <= load_idx or store_idx > last_use_idx:
+                if store_idx <= first_same_addr_load_idx or store_idx > last_use_idx:
+                    continue
+                if repeated_source:
+                    if forced_same_address(store_addr_symbol, load_addr_symbol, constraint_solver):
+                        continue
+                    constraints.append(
+                        symbolic_access_no_overlap(
+                            store_addr_symbol,
+                            store_width,
+                            load_addr_symbol,
+                            init_slot_width(load_inst.width),
+                        )
+                    )
                     continue
                 store_addr = original_access_addr(store_idx)
                 store_state = prefix_states.get(store_addr) if prefix_states is not None else None
