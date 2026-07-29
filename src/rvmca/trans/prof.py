@@ -10386,6 +10386,34 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             candidates = []
             debug_runtime_recipe = os.environ.get("RVMCA_DEBUG_REPAIR") == "1"
 
+            def runtime_stack_ranges(runtime_info):
+                if runtime_info is None:
+                    return ()
+                remainders = runtime_info.get('remainders') or ()
+                if not remainders:
+                    return ()
+                numerator_offset = int(runtime_info['recipe'][1])
+                max_remainder = max(remainders)
+                return tuple(
+                    (
+                        numerator_offset - int(addr_const) + max_remainder,
+                        int(width) + max_remainder,
+                    )
+                    for _, addr_const, width, _ in runtime_info['accesses']
+                )
+
+            def candidate_ranges_available(ranges):
+                return not any(
+                    concrete_ranges_overlap(
+                        candidate_offset,
+                        candidate_width,
+                        used_offset,
+                        used_width,
+                    )
+                    for candidate_offset, candidate_width in ranges
+                    for used_offset, used_width in used_stack_offsets
+                )
+
             def mul_carrier_constraints(mul_node):
                 mul_args = [
                     arg for arg in getattr(mul_node, 'args', ())
@@ -10557,16 +10585,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         if access_offset in seen_offsets:
                             continue
                         seen_offsets.add(access_offset)
-                        if any(
-                            concrete_ranges_overlap(
-                                access_offset,
-                                INIT_ACCESS_SLOT_WIDTH,
-                                used_offset,
-                                used_width,
-                            )
-                            for used_offset, used_width in used_stack_offsets
-                        ):
-                            continue
                         group_targets = []
                         group_constraints = list(shifted_constraints)
                         group_ok = True
@@ -10628,6 +10646,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 break
                         if not runtime_safe:
                             continue
+                        runtime_info = {
+                            'recipe': (
+                                'affine_scaled_quotient',
+                                numerator_offset,
+                                divisor,
+                                multiplier,
+                            ),
+                            'accesses': tuple(runtime_accesses),
+                            'remainders': remainders,
+                        }
+                        if not candidate_ranges_available(
+                            runtime_stack_ranges(runtime_info)
+                        ):
+                            continue
                         candidates.append((
                             value,
                             addr_symbol,
@@ -10635,16 +10667,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                             access_offset,
                             group_constraints,
                             group_targets,
-                            {
-                                'recipe': (
-                                    'affine_scaled_quotient',
-                                    numerator_offset,
-                                    divisor,
-                                    multiplier,
-                                ),
-                                'accesses': tuple(runtime_accesses),
-                                'remainders': remainders,
-                            },
+                            runtime_info,
                         ))
                 return len(candidates) > initial_candidate_count
 
@@ -10823,11 +10846,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         if access_offset in seen_offsets:
                             continue
                         seen_offsets.add(access_offset)
-                        if any(
-                            concrete_ranges_overlap(access_offset, INIT_ACCESS_SLOT_WIDTH, used_offset, used_width)
-                            for used_offset, used_width in used_stack_offsets
-                        ):
-                            continue
                         if not scaled_register_group_ok(access_offset):
                             continue
                         target_addr = concrete_stack_addr(access_offset)
@@ -10882,6 +10900,13 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                     'accesses': tuple(runtime_accesses),
                                     'remainders': remainders,
                                 }
+                        candidate_ranges = (
+                            runtime_stack_ranges(runtime_info)
+                            if runtime_info is not None
+                            else ((access_offset, INIT_ACCESS_SLOT_WIDTH),)
+                        )
+                        if not candidate_ranges_available(candidate_ranges):
+                            continue
                         candidates.append((
                             value,
                             addr_symbol,
@@ -10992,16 +11017,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         timeout_ms=5000,
                     )
                 ):
-                    used_stack_offsets.append((access_offset, INIT_ACCESS_SLOT_WIDTH))
                     if runtime_info is not None:
                         pending_reg_runtime_recipes[symbol_key] = runtime_info
-                        max_remainder = max(runtime_info['remainders'])
-                        for _, other_const, other_width, _ in runtime_info['accesses']:
-                            base_offset = runtime_info['recipe'][1] - other_const
-                            used_stack_offsets.append((
-                                base_offset + max_remainder,
-                                other_width + max_remainder,
-                            ))
+                        used_stack_offsets.extend(runtime_stack_ranges(runtime_info))
+                    else:
+                        used_stack_offsets.append((
+                            access_offset,
+                            INIT_ACCESS_SLOT_WIDTH,
+                        ))
                     if debug_runtime_recipe:
                         DEBUG(f"scaled_address_value_selected {({
                             'symbol': str(symbol),
