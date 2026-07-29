@@ -92,6 +92,7 @@ def test_self_updated_source_load_base_is_not_zeroed(tmp_path):
         transform_for_profiling(asm_path)
         stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
         assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
         completed = subprocess.run(
             [
                 "qemu-riscv64",
@@ -250,6 +251,69 @@ def test_loaded_sp_alias_uses_a_small_scalar_value(tmp_path):
             str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
         ).read_text(encoding="utf-8")
         assert "li x31, 0x190" in init_asm
+
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
+def test_scaled_source_load_initializes_later_pointer(tmp_path):
+    asm_path = tmp_path / "scaled_source_load_pointer_chain.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "ld a5,96(sp)",
+                "slli a2,a5,0x2",
+                "add a2,a2,a5",
+                "lui a5,0x2f8",
+                "slli a2,a2,0x3",
+                "addi a5,a5,-304",
+                "add a5,a5,a2",
+                "ld s3,24(a5)",
+                "ld a5,0(s3)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    for path in generated_paths:
+        path.unlink(missing_ok=True)
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "mul x31, x31, x27" in init_asm
+        assert "sd x27, 0(x31)" in init_asm
 
         completed = subprocess.run(
             [

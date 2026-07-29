@@ -11229,6 +11229,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             return not (scale & (scale - 1))
 
         loaded_affine_quotient_choices = {}
+        loaded_affine_quotient_runtime_accesses = {}
 
         def choose_affine_quotient_loaded_address_value(
             symbol,
@@ -11244,6 +11245,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return None
 
             related_accesses = []
+            runtime_accesses = []
             affine_constraints = []
             affine_constraint_keys = set()
             affine_constraint_vars = set()
@@ -11254,7 +11256,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             for _, loaded_symbol, _, _ in load_accesses:
                 loaded_value_vars.update(expr_vars(loaded_symbol))
             used_explicit_livein_constraints = False
-            for _, addr_symbol, access_idx, width in mem_accesses:
+            for access_inst, addr_symbol, access_idx, width in mem_accesses:
                 if access_idx <= load_idx or not (expr_vars(addr_symbol) & symbol_vars):
                     continue
                 scaled = scaled_symbol_affine(addr_symbol, symbol)
@@ -11306,6 +11308,12 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     except Exception:
                         return None
                 related_accesses.append((addr_symbol, width, scale, _signed_u64(const)))
+                runtime_accesses.append((
+                    access_idx,
+                    _signed_u64(const),
+                    width,
+                    access_inst.type == IType.Load,
+                ))
             if not related_accesses:
                 return None
             if (
@@ -11428,6 +11436,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         })}")
                     choice = (value, recipe)
                     loaded_affine_quotient_choices[choice_key] = choice
+                    loaded_affine_quotient_runtime_accesses[choice_key] = (
+                        recipe,
+                        tuple(runtime_accesses),
+                    )
                     return choice
             return None
 
@@ -22447,98 +22459,105 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             4: 'sw',
             8: 'sd',
         }
-        for reg, recipe in reg_runtime_recipes.items():
-            for inst_idx, addr_const, width, is_load in reg_runtime_accesses.get(reg, ()):
-                if not is_load or width not in store_name_for_width:
-                    continue
-                layout = load_slot_layouts.get(inst_idx)
-                if layout is None:
-                    raw_value = 0
-                else:
-                    word_offset, byte_offset, layout_width = layout
-                    if layout_width != width:
-                        continue
-                    word_value = mem_values.get(word_offset, 0)
-                    raw_value = (
-                        word_value >> (byte_offset * 8)
-                    ) & ((1 << (width * 8)) - 1)
-                value_recipe = (
-                    sp_affine_mode(sp_affine_mem_offsets, layout[0])
-                    if layout is not None
-                    else None
-                )
-                entry = (
-                    recipe,
-                    addr_const,
-                    width,
-                    raw_value,
-                    value_recipe,
-                )
-                if entry in seen_dynamic_mem_inits:
-                    continue
-                seen_dynamic_mem_inits.add(entry)
-                dynamic_mem_inits.append(entry)
+        def append_dynamic_mem_init(recipe, inst_idx, addr_const, width, is_load):
+            if not is_load or width not in store_name_for_width:
+                return
+            layout = load_slot_layouts.get(inst_idx)
+            if layout is None:
+                raw_value = 0
+            else:
+                word_offset, byte_offset, layout_width = layout
+                if layout_width != width:
+                    return
+                word_value = mem_values.get(word_offset, 0)
+                raw_value = (
+                    word_value >> (byte_offset * 8)
+                ) & ((1 << (width * 8)) - 1)
+            value_recipe = (
+                sp_affine_mode(sp_affine_mem_offsets, layout[0])
+                if layout is not None
+                else None
+            )
+            entry = (
+                recipe,
+                addr_const,
+                width,
+                raw_value,
+                value_recipe,
+            )
+            if entry in seen_dynamic_mem_inits:
+                return
+            seen_dynamic_mem_inits.add(entry)
+            dynamic_mem_inits.append(entry)
 
-                address_recipe = (
-                    'affine_quotient',
-                    recipe[1],
-                    recipe[2],
-                )
-                append_value_init(
-                    candidate_init,
-                    TEMP_REG,
-                    0,
-                    force_affine_quotient=address_recipe,
-                )
+            address_recipe = (
+                'affine_quotient',
+                recipe[1],
+                recipe[2],
+            )
+            append_value_init(
+                candidate_init,
+                TEMP_REG,
+                0,
+                force_affine_quotient=address_recipe,
+            )
+            candidate_init.append(
+                RFmtInst('mul', TEMP_REG, TEMP_REG, TEMP_REG2)
+            )
+            if addr_const:
                 candidate_init.append(
-                    RFmtInst('mul', TEMP_REG, TEMP_REG, TEMP_REG2)
+                    UFmtInst('li', TEMP_REG2, abs(addr_const))
                 )
-                if addr_const:
-                    candidate_init.append(
-                        UFmtInst('li', TEMP_REG2, abs(addr_const))
-                    )
-                    candidate_init.append(RFmtInst(
-                        'add' if addr_const > 0 else 'sub',
-                        TEMP_REG,
-                        TEMP_REG,
-                        TEMP_REG2,
-                    ))
-                value_stack_offset = stack_offset_for_value(raw_value)
-                value_force_sp_delta = None
-                value_force_inverse_sp_delta = None
-                value_force_scaled_stack = None
-                if value_recipe == 'direct':
-                    value_force_sp_delta = (
-                        raw_value - CONCRETE_REPLAY_SP
-                    ) & ((1 << 64) - 1)
-                elif value_recipe == 'inverse':
-                    value_force_inverse_sp_delta = (
-                        raw_value + CONCRETE_REPLAY_SP
-                    ) & ((1 << 64) - 1)
-                elif (
-                    isinstance(value_recipe, (tuple, list))
-                    and len(value_recipe) == 3
-                    and value_recipe[0] == 'scaled'
-                ):
-                    value_force_scaled_stack = (
-                        int(value_recipe[1]),
-                        int(value_recipe[2]),
-                    )
-                append_value_init(
-                    candidate_init,
-                    TEMP_REG2,
-                    raw_value,
-                    force_stack_offset=value_stack_offset,
-                    force_sp_delta=value_force_sp_delta,
-                    force_inverse_sp_delta=value_force_inverse_sp_delta,
-                    force_scaled_stack=value_force_scaled_stack,
-                )
-                candidate_init.append(StoreInst(
-                    store_name_for_width[width],
-                    TEMP_REG2,
+                candidate_init.append(RFmtInst(
+                    'add' if addr_const > 0 else 'sub',
                     TEMP_REG,
-                    0,
+                    TEMP_REG,
+                    TEMP_REG2,
                 ))
+            value_stack_offset = stack_offset_for_value(raw_value)
+            value_force_sp_delta = None
+            value_force_inverse_sp_delta = None
+            value_force_scaled_stack = None
+            if value_recipe == 'direct':
+                value_force_sp_delta = (
+                    raw_value - CONCRETE_REPLAY_SP
+                ) & ((1 << 64) - 1)
+            elif value_recipe == 'inverse':
+                value_force_inverse_sp_delta = (
+                    raw_value + CONCRETE_REPLAY_SP
+                ) & ((1 << 64) - 1)
+            elif (
+                isinstance(value_recipe, (tuple, list))
+                and len(value_recipe) == 3
+                and value_recipe[0] == 'scaled'
+            ):
+                value_force_scaled_stack = (
+                    int(value_recipe[1]),
+                    int(value_recipe[2]),
+                )
+            append_value_init(
+                candidate_init,
+                TEMP_REG2,
+                raw_value,
+                force_stack_offset=value_stack_offset,
+                force_sp_delta=value_force_sp_delta,
+                force_inverse_sp_delta=value_force_inverse_sp_delta,
+                force_scaled_stack=value_force_scaled_stack,
+            )
+            candidate_init.append(StoreInst(
+                store_name_for_width[width],
+                TEMP_REG2,
+                TEMP_REG,
+                0,
+            ))
+
+        for reg, recipe in reg_runtime_recipes.items():
+            for access in reg_runtime_accesses.get(reg, ()):
+                append_dynamic_mem_init(recipe, *access)
+
+        for recipe, accesses in loaded_affine_quotient_runtime_accesses.values():
+            for access in accesses:
+                append_dynamic_mem_init(recipe, *access)
 
         reg_init = rebuild_register_init()
         candidate_init.extend(reg_init)
