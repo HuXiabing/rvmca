@@ -262,6 +262,50 @@ def test_forwarded_load_residual_cancellation_keeps_direct_stack_carrier(tmp_pat
     _assert_profiled_program_runs(asm_path)
 
 
+def test_committed_forwarded_residual_is_not_reclassified_sp_affine(tmp_path):
+    asm_path = tmp_path / "committed_forwarded_residual.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "slli a2,a5,0x2",
+                "sub a2,a2,a6",
+                "sd a2,16(sp)",
+                "sd a5,112(sp)",
+                "addi a2,a6,0",
+                "lui a1,0x720",
+                "addi a1,a1,-1688",
+                "add a0,a1,a2",
+                "lui a1,0x720",
+                "addi a1,a1,-1608",
+                "add a1,a1,a2",
+                "lw t1,-4(a1)",
+                "lui a1,0x720",
+                "addi a1,a1,-1528",
+                "add a1,a1,a2",
+                "lw t4,-4(a0)",
+                "lw a0,-4(a1)",
+                "ld a1,16(sp)",
+                "ld t6,0(sp)",
+                "ld a5,8(sp)",
+                "add a1,a1,a2",
+                "addw t4,t4,t6",
+                "add t6,s5,a1",
+                "addw t1,t1,a5",
+                "addw a0,a0,t5",
+                "sw t4,0(t6)",
+                "add t4,s1,a1",
+                "add a1,sp,a1",
+                "sw t1,0(t4)",
+                "sw a0,1376(a1)",
+                "addi a2,a2,4",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _assert_profiled_program_runs(asm_path)
+
+
 def test_repeated_pointer_source_slot_survives_intervening_stores(tmp_path):
     asm_path = tmp_path / "repeated_pointer_source_store_chain.S"
     asm_path.write_text(

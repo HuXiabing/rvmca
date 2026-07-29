@@ -2721,6 +2721,14 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
             if has_independent_direct_use:
                 return True
+            residual_zero_solver = base_solver.branch()
+            residual_zero_solver.timeout = HEURISTIC_SOLVER_TIMEOUT_MS
+            try:
+                residual_zero_solver.add(carrier_residual == 0)
+                if residual_zero_solver.satisfiable():
+                    return True
+            except Exception:
+                continue
         return False
 
     # For every later memory address that depends on loaded data, choose one
@@ -2909,10 +2917,45 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 return True
         return False
 
+    def load_value_only_feeds_forwarded_cancellations(
+        load_inst,
+        rd_symbol,
+        load_addr_symbol,
+        load_idx,
+    ):
+        if load_inst.width != 8:
+            return False
+        rd_vars = set(getattr(rd_symbol, 'variables', set()))
+        if not rd_vars:
+            return False
+        found_consumer = False
+        for _, addr_symbol, access_idx, _ in mem_accesses:
+            if access_idx <= load_idx:
+                continue
+            if not (set(getattr(addr_symbol, 'variables', set())) & rd_vars):
+                continue
+            found_consumer = True
+            if not forwarded_load_cancels_pointer_residual(
+                load_inst,
+                rd_symbol,
+                load_addr_symbol,
+                load_idx,
+                addr_symbol,
+            ):
+                return False
+        return found_consumer
+
     pointer_required_loads = []
     seen_pointer_required_loads = set()
     for entry in pointer_source_loads:
         load_inst, rd_symbol, load_addr_symbol, load_idx = entry
+        if load_value_only_feeds_forwarded_cancellations(
+            load_inst,
+            rd_symbol,
+            load_addr_symbol,
+            load_idx,
+        ):
+            continue
         key = (load_idx, str(rd_symbol), str(load_addr_symbol))
         if key in seen_pointer_required_loads:
             continue
@@ -4062,6 +4105,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             if key not in expr_vars_cache:
                 expr_vars_cache[key] = getattr(expr, 'variables', set())
             return expr_vars_cache[key]
+
+        sp_affine_source_vars = set()
+        for _, rd_symbol, _, load_idx in load_accesses:
+            if (load_idx, str(rd_symbol)) in sp_affine_source_load_keys:
+                sp_affine_source_vars.update(expr_vars(rd_symbol))
 
         def vars_belong_to_single_register(varset):
             varset = set(varset)
@@ -8206,6 +8254,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     residual_vars = expr_vars(residual)
                     if not residual_vars or (residual_vars & symbol_vars):
                         continue
+                    if residual_vars & sp_affine_source_vars:
+                        continue
                     if residual_vars & source_load_base_vars:
                         continue
                     target_candidates = list(small_targets)
@@ -8513,6 +8563,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if residual_vars & symbol_vars:
                         continue
                     if not (residual_vars & address_loaded_addr_vars):
+                        continue
+                    if residual_vars & sp_affine_source_vars:
                         continue
                     direct_additive_base_residual = additive_residual_without_term(
                         addr_symbol,
@@ -16577,6 +16629,19 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 reg_symbol = reg_to_symbol.get(reg)
                 if reg_symbol is not None:
                     residual_scalar_reg_vars.update(expr_vars(reg_symbol))
+            sp_affine_coupled_vars = set(sp_affine_source_vars)
+            sp_vars = expr_vars(init_sp)
+            changed = True
+            while changed:
+                changed = False
+                for constraint in candidate_solver.constraints:
+                    constraint_vars = expr_vars(constraint) - sp_vars
+                    if not (constraint_vars & sp_affine_coupled_vars):
+                        continue
+                    new_vars = constraint_vars - sp_affine_coupled_vars
+                    if new_vars:
+                        sp_affine_coupled_vars.update(new_vars)
+                        changed = True
             seen_carriers = set()
             for symbol, allow_direct_add in carrier_symbols:
                 carrier_key = expr_key(symbol)
@@ -16730,12 +16795,21 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                 getattr(constraint, 'variables', set()) & residual_scalar_reg_vars
                                 for constraint in constraints
                             )
+                            touches_sp_affine_recipe = any(
+                                (expr_vars(constraint) - sp_vars)
+                                & sp_affine_coupled_vars
+                                for constraint in constraints
+                            )
                             carrier_sat = constraint_set_related_satisfiable(
                                 constraints,
                                 expr_vars(addr_expr) | symbol_vars | expr_vars(residual),
                                 timeout_ms=carrier_related_timeout_ms,
                             )
-                            if carrier_sat is not False and not touches_residual_scalar:
+                            if (
+                                carrier_sat is not False
+                                and not touches_residual_scalar
+                                and not touches_sp_affine_recipe
+                            ):
                                 for constraint in constraints:
                                     candidate_solver.add(constraint)
                                     added_constraint_cache.add(str(claripy.simplify(constraint)))
@@ -16751,14 +16825,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                                         'sat': carrier_sat,
                                     })}")
                                 return access_offset
-                            if debug_load_slots and carrier_sat is not False and touches_residual_scalar:
-                                DEBUG(f"carrier_residual_skip_assumed_scalar {({
+                            if (
+                                debug_load_slots
+                                and carrier_sat is not False
+                                and (touches_residual_scalar or touches_sp_affine_recipe)
+                            ):
+                                DEBUG(f"carrier_residual_skip_assumed_coupled {({
                                     'addr': str(addr_symbol),
                                     'carrier': str(symbol),
                                     'access_offset': access_offset,
                                     'base_offset': base_offset,
                                     'target': _signed_u64(residual_target),
                                     'sat': carrier_sat,
+                                    'residual_scalar': touches_residual_scalar,
+                                    'sp_affine_recipe': touches_sp_affine_recipe,
                                 })}")
                         if debug_load_slots:
                             DEBUG(f"carrier_residual_reject_solver {({
@@ -17400,6 +17480,68 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     max(min_offset, pointer_load_min_offset),
                     INIT_ACCESS_ALIGN,
                 )
+
+        forwarded_residual_base_regs = set()
+        for load_inst, rd_symbol, load_addr_symbol, load_idx in load_accesses:
+            if (
+                load_inst.width != 8
+                or (load_idx, str(rd_symbol)) not in sp_affine_source_load_keys
+            ):
+                continue
+            prior_store = prior_same_addr_store(
+                load_addr_symbol,
+                load_idx,
+                allow_solver=False,
+            )
+            if prior_store is None:
+                continue
+            _, _, _, store_width, store_data_symbol = prior_store
+            stored_expr = stored_value_for_load(
+                store_data_symbol,
+                store_width,
+                load_inst,
+            )
+            if stored_expr is None:
+                continue
+            rd_vars = expr_vars(rd_symbol)
+            for _, addr_symbol, access_idx, width in mem_accesses:
+                if access_idx <= load_idx or not (expr_vars(addr_symbol) & rd_vars):
+                    continue
+                forwarded_addr = claripy.simplify(
+                    claripy.replace_dict(
+                        addr_symbol,
+                        {rd_symbol.hash(): stored_expr},
+                    )
+                )
+                for reg, symbol in reg_to_symbol.items():
+                    if reg_defined_before_access(reg, access_idx):
+                        continue
+                    symbol_vars = expr_vars(symbol)
+                    if not symbol_vars or not (expr_vars(forwarded_addr) & symbol_vars):
+                        continue
+                    residual = claripy.simplify(forwarded_addr - symbol)
+                    if expr_vars(residual) & symbol_vars:
+                        continue
+                    residual_constraints = constraints_to_constant(
+                        residual,
+                        0,
+                        forbidden_vars=symbol_vars,
+                    )
+                    if residual_constraints is None:
+                        continue
+                    if not try_add_constraint_set(residual_constraints):
+                        continue
+                    forwarded_residual_base_regs.add(reg)
+                    base_like_regs.add(reg)
+                    base_like_sources.setdefault(
+                        reg,
+                        'store_forwarded_residual',
+                    )
+                    reg_min_stack_offsets[reg] = max(
+                        reg_min_stack_offsets.get(reg, INIT_PTR_MIN_OFFSET),
+                        _align_up(max(INIT_PTR_MIN_OFFSET, width), INIT_ACCESS_ALIGN),
+                    )
+
         for reg, symbol in reg_to_symbol.items():
             symbol_vars = getattr(symbol, 'variables', set())
             if not symbol_vars:
@@ -17546,6 +17688,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 direct_memory_base_like_regs.add(reg)
                 break
         direct_memory_base_like_regs.update(repeated_direct_base_regs)
+        direct_memory_base_like_regs.update(forwarded_residual_base_regs)
 
         def reg_has_direct_scaled_residual_base_use(reg):
             symbol = reg_to_symbol.get(reg)
