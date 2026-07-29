@@ -1147,13 +1147,22 @@ The first change converted `481.wrf_319` to PASS while the other nine still
 failed at `init:materialize_init:memory_values:slot`.  With the exact alias
 proof, the same 10-ID set completed as 10/10 PASS with no FAIL, SKIP, or
 timeout.  The previous repeated-source 20-ID benefit set was also rerun and
-remained 20/20 PASS.  The reports and frozen candidate set are:
+remained 20/20 PASS.
+
+A follow-up run of the eight non-PASS blocks left in the earlier 55-ID WRF
+discovery set found two more instances of the same exact-alias pattern:
+`481.wrf_909` and `481.wrf_913`.  Both had failed at `pointer_relaxed_eval`
+with the old profiler, passed in the follow-up, and passed again in an
+independent single-worker run.  The reports and frozen attributed sets are:
 
 ```text
 tests/failure_reports/spec06_wrf_read_alias_candidate10_current_300/status.json
 tests/failure_reports/spec06_wrf_read_alias_candidate10_forced_alias_300/status.json
 tests/failure_reports/spec06_wrf_repeated_source_pass20_forced_alias_status_300/status.json
+tests/failure_reports/spec06_wrf_post_alias_remaining8_300/status.json
+tests/failure_reports/spec06_wrf_forced_alias_additional_pass2_round2_300/status.json
 tests/failure_reports/id_sets/spec06_wrf_read_alias_candidate10.ids
+tests/failure_reports/id_sets/spec06_wrf_forced_alias_additional_pass2.ids
 ```
 
 The final profiler SHA-256 for this round is:
@@ -1163,14 +1172,15 @@ a9887c0a28c05a7f9c2ca18868962572b4344739f520ad9b46bb16ccf10b9371
 ```
 
 The prior 1,809 benefit IDs are unique across their 11 frozen ID sets.  Their
-intersection with this 10-ID set is empty, and the combined union contains
-exactly 1,819 IDs.  Conservative accounting is therefore:
+intersections with the new 10-ID and 2-ID sets are empty, the two new sets are
+also disjoint, and the combined union contains exactly 1,821 IDs.
+Conservative accounting is therefore:
 
 ```text
 previously confirmed original failed -> PASS   1809
-new read-only/forced-alias PASS                   10
-confirmed original failed -> PASS               1819
-1819 / 2375                                    76.59%
+new read-only/forced-alias PASS                   12
+confirmed original failed -> PASS               1821
+1821 / 2375                                    76.67%
 original failed -> SKIP counted as benefit          0
 ```
 
