@@ -38,6 +38,23 @@ MIXED_LOADED_AND_LIVEIN_AFFINE_BLOCK_ASM = [
     "sd a2,0(a4)",
 ]
 
+COUPLED_LIVEIN_BASE_BLOCK_ASM = [
+    "addi a2,zero,8",
+    "addw a5,a5,a2",
+    "addiw a5,a5,-1",
+    "divw a5,a5,a2",
+    "addi a2,zero,104",
+    "lui s10,0x430",
+    "addi s10,s10,-1896",
+    "add a4,s10,s1",
+    "addi a1,zero,1",
+    "sb a1,1912(a4)",
+    "mul a2,s1,a2",
+    "addi a4,a5,0",
+    "add a2,s0,a2",
+    "sd s9,64(a2)",
+]
+
 
 def test_linear_runtime_recipe_tracks_signed_sp_coefficient():
     anchor_value = CONCRETE_REPLAY_SP - 0x380
@@ -47,6 +64,47 @@ def test_linear_runtime_recipe_tracks_signed_sp_coefficient():
         assert _runtime_reg_recipe_value(sp_value, recipe) == (
             anchor_value - 7 * (sp_value - CONCRETE_REPLAY_SP)
         ) & ((1 << 64) - 1)
+
+
+def test_coupled_livein_bases_replay_safely(tmp_path):
+    asm_path = tmp_path / "coupled_livein_bases.S"
+    asm_path.write_text(
+        "\n".join(COUPLED_LIVEIN_BASE_BLOCK_ASM) + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
 
 
 def test_runtime_affine_loaded_value_address_replays_safely(tmp_path):

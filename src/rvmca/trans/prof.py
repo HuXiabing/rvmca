@@ -1658,6 +1658,32 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     inst=getattr(inst, 'code', str(inst)),
                 )
             states_by_addr[begin_addr + inst_idx * 4] = ConcretePrefixState(regs.copy())
+            coupled_undef_check = (
+                inst_idx < len(regs_undefined)
+                and inst.type == IType.Branch
+                and getattr(inst, 'name', '') == 'blt'
+                and getattr(inst, 'rs2', None) == XREG[0]
+                and getattr(inst, 'label', None) == 'fail'
+                and (
+                    bool(
+                        getattr(
+                            reg_to_symbol.get(getattr(inst, 'rs1', None)),
+                            'variables',
+                            set(),
+                        )
+                        & coupled_livein_vars
+                    )
+                    or (
+                        (reg_runtime_recipes or {}).get(
+                            getattr(inst, 'rs1', None),
+                            (None,),
+                        )[0]
+                        == 'affine_linear'
+                    )
+                )
+            )
+            if coupled_undef_check:
+                continue
             if isinstance(inst, RFmtInst):
                 value = eval_r(inst)
                 if value is None or not set_reg(inst.rd, value):
@@ -2112,6 +2138,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
     mem_base_map = {}
     load_accesses = []
     mem_accesses = []
+    runtime_translation_mem_accesses = []
     store_accesses = []
     access_insts = []
     for inst_idx, inst in enumerate(prog2se.insts):
@@ -2396,7 +2423,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             )
             if inst.type in [IType.Load, IType.Store, IType.Amo]:
                 base_symbol = reg_value(inst.rs1)
-                addr_symbol = maybe_simplify(base_symbol + bvv(inst.imm))
+                raw_addr_symbol = maybe_simplify(base_symbol + bvv(inst.imm))
+                runtime_translation_mem_accesses.append(
+                    (inst, raw_addr_symbol, inst_idx, inst.width)
+                )
+                addr_symbol = raw_addr_symbol
                 addr_symbol = zero_base_plus_mul_residuals(addr_symbol)
                 mem_accesses.append((inst, addr_symbol, inst_idx, inst.width))
                 if inst.type in [IType.Store, IType.Amo]:
@@ -2458,6 +2489,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
             addr_symbol = base_symbol + inst.imm
             mem_accesses.append((inst, addr_symbol, inst_idx, inst.width))
+            runtime_translation_mem_accesses.append(
+                (inst, addr_symbol, inst_idx, inst.width)
+            )
             if inst.type in [IType.Store, IType.Amo]:
                 data_symbol = getattr(simgr.found[0].regs, str(inst.rs2))
                 store_accesses.append((inst, addr_symbol, inst_idx, inst.width, data_symbol))
@@ -2499,6 +2533,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             # existing instruction-level model, which gives each load one
             # stable symbol throughout its downstream address dataflow.
             mem_accesses.clear()
+            runtime_translation_mem_accesses.clear()
             load_accesses.clear()
             store_accesses.clear()
             mem_base_map.clear()
@@ -2533,9 +2568,124 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         solver = final_state.solver
         solver.add(final_state.regs.x0 == 0)
 
+    coupled_livein_vars = set()
+    if use_static_memory_collection:
+        runtime_loaded_value_vars = set().union(*(
+            getattr(rd_symbol, 'variables', set())
+            for _, rd_symbol, _, _ in load_accesses
+        )) if load_accesses else set()
+        reg_varsets = {
+            reg: getattr(symbol, 'variables', set())
+            for reg, symbol in reg_to_symbol.items()
+            if getattr(symbol, 'variables', set())
+        }
+        address_varsets = [
+            getattr(addr_symbol, 'variables', set())
+            for _, addr_symbol, _, _ in runtime_translation_mem_accesses
+        ]
+        remaining_regs = {
+            reg
+            for reg, reg_vars in reg_varsets.items()
+            if any(reg_vars & addr_vars for addr_vars in address_varsets)
+        }
+        while remaining_regs:
+            component_regs = {remaining_regs.pop()}
+            component_addresses = set()
+            changed = True
+            while changed:
+                changed = False
+                for reg in component_regs:
+                    for addr_idx, addr_vars in enumerate(address_varsets):
+                        if (
+                            addr_idx not in component_addresses
+                            and reg_varsets[reg] & addr_vars
+                        ):
+                            component_addresses.add(addr_idx)
+                            changed = True
+                for reg in list(remaining_regs):
+                    if any(
+                        reg_varsets[reg] & address_varsets[addr_idx]
+                        for addr_idx in component_addresses
+                    ):
+                        remaining_regs.remove(reg)
+                        component_regs.add(reg)
+                        changed = True
+            component_address_vars = set().union(*(
+                address_varsets[addr_idx]
+                for addr_idx in component_addresses
+            ))
+            if (
+                len(component_regs) == 2
+                and len(component_addresses) == 2
+                and not (component_address_vars & runtime_loaded_value_vars)
+            ):
+                for reg in component_regs:
+                    coupled_livein_vars.update(reg_varsets[reg])
+
+        if coupled_livein_vars:
+            runtime_addr_by_idx = {
+                inst_idx: addr_symbol
+                for _, addr_symbol, inst_idx, _ in runtime_translation_mem_accesses
+            }
+            mem_accesses[:] = [
+                (
+                    inst,
+                    runtime_addr_by_idx.get(inst_idx, addr_symbol),
+                    inst_idx,
+                    width,
+                )
+                for inst, addr_symbol, inst_idx, width in mem_accesses
+            ]
+            load_accesses[:] = [
+                (
+                    inst,
+                    rd_symbol,
+                    runtime_addr_by_idx.get(inst_idx, addr_symbol),
+                    inst_idx,
+                )
+                for inst, rd_symbol, addr_symbol, inst_idx in load_accesses
+            ]
+            store_accesses[:] = [
+                (
+                    inst,
+                    runtime_addr_by_idx.get(inst_idx, addr_symbol),
+                    inst_idx,
+                    width,
+                    data_symbol,
+                )
+                for inst, addr_symbol, inst_idx, width, data_symbol in store_accesses
+            ]
+            load_entry_by_idx = {
+                entry[3]: entry
+                for entry in load_accesses
+            }
+            for load_inst, load_entry in list(mem_base_map.items()):
+                mem_base_map[load_inst] = load_entry_by_idx.get(
+                    load_entry[3],
+                    load_entry,
+                )
+
     for constraint in undef_reg_check_constraints:
+        if getattr(constraint, 'variables', set()) & coupled_livein_vars:
+            if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                DEBUG(f"undef_nonnegative_skip_coupled_livein {({
+                    'constraint': str(claripy.simplify(constraint)),
+                })}")
+            continue
         solver.add(constraint)
     for constraint in static_mul_zero_constraints:
+        constraint_vars = getattr(constraint, 'variables', set())
+        affected_runtime_addresses = sum(
+            bool(getattr(addr_symbol, 'variables', set()) & constraint_vars)
+            for _, addr_symbol, _, _ in runtime_translation_mem_accesses
+        )
+        if constraint_vars & coupled_livein_vars:
+            if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                DEBUG(f"static_mul_zero_preserve_coupled_livein {({
+                    'constraint': str(claripy.simplify(constraint)),
+                    'affected_accesses': affected_runtime_addresses,
+                })}")
+            continue
         solver.add(constraint)
 
     _write_profile_stage(name, "init:constraint_satisfiability")
@@ -7395,6 +7545,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         return True
                 return False
 
+            def has_coupled_direct_address_use(reg):
+                symbol = reg_to_symbol.get(reg)
+                if symbol is None:
+                    return False
+                symbol_vars = expr_vars(symbol)
+                if not symbol_vars:
+                    return False
+                if not (symbol_vars & coupled_livein_vars):
+                    return False
+                address_uses = [
+                    addr_symbol
+                    for _, addr_symbol, _, _ in runtime_translation_mem_accesses
+                    if expr_vars(addr_symbol) & symbol_vars
+                ]
+                if len(address_uses) < 2:
+                    return False
+                return any(
+                    not (expr_vars(claripy.simplify(addr_symbol - symbol)) & symbol_vars)
+                    for addr_symbol in address_uses
+                )
+
             fixed_reg_values = {}
             for reg, values in reg_value_hints.items():
                 if reg not in reg_to_symbol:
@@ -7403,6 +7574,8 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     continue
                 values = unique_values(values)
                 if len(values) != 1:
+                    continue
+                if values[0] == 0 and has_coupled_direct_address_use(reg):
                     continue
                 if values[0] == 0 and has_fixed_residual_mul_carrier_use(reg):
                     continue
@@ -17241,6 +17414,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         mixed_affine_residual_regs = (
             mixed_affine_primary_residual_regs | mixed_affine_support_regs
         )
+        mixed_affine_residual_regs = {
+            reg
+            for reg in mixed_affine_residual_regs
+            if not (expr_vars(reg_to_symbol.get(reg)) & coupled_livein_vars)
+        }
+        mixed_affine_primary_residual_regs.intersection_update(
+            mixed_affine_residual_regs
+        )
+        mixed_affine_support_regs.intersection_update(
+            mixed_affine_residual_regs
+        )
         mixed_affine_zero_constraints = [
             reg_to_symbol[reg] == expr_bvv(0, reg_to_symbol[reg])
             for reg in sorted(
@@ -18218,6 +18402,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 and not fixed_residual_mul_carrier_use
                 and r not in scalar_hint_regs
             )
+            coupled_runtime_livein = bool(
+                symbol_vars_for_fallback & coupled_livein_vars
+            )
             if os.environ.get("RVMCA_DEBUG_LOAD_SLOTS") == "1" and (
                 has_additive_address_use or has_nonadditive_address_use
             ):
@@ -18238,6 +18425,27 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'direct_affine_address_base': direct_affine_address_base,
                 })}")
             val = None
+            if coupled_runtime_livein:
+                write_stage(
+                    "init:materialize_init:register",
+                    reg=r.name,
+                    phase="coupled_runtime_model",
+                )
+                for model_val in solver_eval_current(symbol, n=8, timeout_ms=5000):
+                    model_constraint = symbol == expr_bvv(model_val, symbol)
+                    if (
+                        try_add_constraint_set_fast(
+                            [model_constraint],
+                            timeout_ms=5000,
+                        )
+                        or try_add_constraint_set_related(
+                            [model_constraint],
+                            symbol_vars_for_fallback,
+                            timeout_ms=5000,
+                        )
+                    ):
+                        val = model_val & ((1 << 64) - 1)
+                        break
             if r in mixed_affine_residual_regs:
                 write_stage(
                     "init:materialize_init:register",
@@ -18280,8 +18488,9 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                         val = model_val & ((1 << 64) - 1)
                         break
             if (
-                r not in base_like_regs
-		                and has_additive_address_use
+                val is None
+                and r not in base_like_regs
+                and has_additive_address_use
                 and (has_other_stack_carrier or additive_offset_to_pointer_source)
                 and not fixed_residual_mul_carrier_use
             ):
@@ -22542,8 +22751,6 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     'base_count': len(base_replacements),
                     'unsupported_vars': sorted(unsupported_runtime_source_vars),
                 })}")
-            if not source_replacements:
-                return
 
             def flows_to_control(reg):
                 tainted = {reg}
@@ -22561,6 +22768,181 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     if not tainted:
                         break
                 return False
+
+            def install_joint_livein_recipes():
+                loaded_value_vars = set().union(*(
+                    expr_vars(rd_symbol)
+                    for _, rd_symbol, _, _ in load_accesses
+                )) if load_accesses else set()
+                candidate_info = {}
+                address_by_hash = {}
+                for reg in regs_undefined:
+                    if reg in reg_runtime_recipes or reg not in reg_values:
+                        continue
+                    if (
+                        reg not in base_like_regs
+                        and reg not in undef_base_regs
+                    ) or flows_to_control(reg):
+                        continue
+                    symbol = reg_to_symbol.get(reg)
+                    symbol_vars = expr_vars(symbol)
+                    if not symbol_vars:
+                        continue
+                    affected_addresses = []
+                    for _, addr_symbol, _, _ in runtime_translation_mem_accesses:
+                        if not (expr_vars(addr_symbol) & symbol_vars):
+                            continue
+                        address_by_hash[addr_symbol.hash()] = addr_symbol
+                        affected_addresses.append(addr_symbol.hash())
+                    if not affected_addresses:
+                        continue
+                    affected_vars = set().union(*(
+                        expr_vars(address_by_hash[addr_hash])
+                        for addr_hash in affected_addresses
+                    ))
+                    if affected_vars & unsupported_runtime_source_vars:
+                        continue
+                    candidate_info[reg] = {
+                        'symbol': symbol,
+                        'symbol_vars': symbol_vars,
+                        'addresses': set(affected_addresses),
+                    }
+
+                remaining_regs = set(candidate_info)
+                while remaining_regs:
+                    component_regs = {remaining_regs.pop()}
+                    component_addresses = set()
+                    changed = True
+                    while changed:
+                        changed = False
+                        for reg in list(component_regs):
+                            new_addresses = (
+                                candidate_info[reg]['addresses'] - component_addresses
+                            )
+                            if new_addresses:
+                                component_addresses.update(new_addresses)
+                                changed = True
+                        for reg in list(remaining_regs):
+                            if candidate_info[reg]['addresses'] & component_addresses:
+                                remaining_regs.remove(reg)
+                                component_regs.add(reg)
+                                changed = True
+
+                    # A single live-in or a single address does not establish
+                    # the coupled-base pattern this fallback is designed for.
+                    if len(component_regs) != 2 or len(component_addresses) != 2:
+                        continue
+                    component_address_vars = set().union(*(
+                        expr_vars(address_by_hash[addr_hash])
+                        for addr_hash in component_addresses
+                    ))
+                    if component_address_vars & loaded_value_vars:
+                        continue
+
+                    coefficient_symbols = {
+                        reg: claripy.BVS(
+                            f"rvmca_joint_linear_coefficient_{reg.name}",
+                            64,
+                        )
+                        for reg in component_regs
+                    }
+                    unit_delta = claripy.BVV(1, 64)
+                    unit_delta_replacement = {
+                        translation_delta.hash(): unit_delta,
+                    }
+                    solve_replacements = {
+                        key: claripy.replace_dict(value, unit_delta_replacement)
+                        for key, value in base_replacements.items()
+                    }
+                    for reg in component_regs:
+                        symbol = candidate_info[reg]['symbol']
+                        solve_replacements[symbol.hash()] = (
+                            symbol + coefficient_symbols[reg]
+                        )
+
+                    coefficient_solver = claripy.Solver()
+                    coefficient_solver.timeout = max(local_solver_timeout_ms, 1000)
+                    max_coefficient = STACK_RANGE
+                    negative_floor = (1 << 64) - max_coefficient
+                    for coefficient_symbol in coefficient_symbols.values():
+                        coefficient_solver.add(coefficient_symbol != 0)
+                        coefficient_solver.add(claripy.Or(
+                            coefficient_symbol <= max_coefficient,
+                            coefficient_symbol >= negative_floor,
+                        ))
+                    for addr_hash in component_addresses:
+                        addr_symbol = address_by_hash[addr_hash]
+                        coefficient_solver.add(
+                            claripy.replace_dict(addr_symbol, solve_replacements)
+                            == addr_symbol + unit_delta
+                        )
+                    try:
+                        if not coefficient_solver.satisfiable():
+                            continue
+                        coefficients = {}
+                        for reg, coefficient_symbol in coefficient_symbols.items():
+                            raw_coefficient = coefficient_solver.eval(
+                                coefficient_symbol,
+                                1,
+                            )[0]
+                            coefficients[reg] = (
+                                raw_coefficient
+                                if raw_coefficient < (1 << 63)
+                                else raw_coefficient - (1 << 64)
+                            )
+                    except Exception:
+                        continue
+
+                    proof_replacements = dict(base_replacements)
+                    for reg, coefficient in coefficients.items():
+                        symbol = candidate_info[reg]['symbol']
+                        proof_replacements[symbol.hash()] = (
+                            symbol + translation_delta * expr_bvv(
+                                coefficient & ((1 << 64) - 1),
+                                symbol,
+                            )
+                        )
+                    if not all(
+                        translation_identity(
+                            claripy.replace_dict(
+                                address_by_hash[addr_hash],
+                                proof_replacements,
+                            ),
+                            address_by_hash[addr_hash] + translation_delta,
+                        )
+                        for addr_hash in component_addresses
+                    ):
+                        continue
+
+                    for reg, coefficient in coefficients.items():
+                        anchor_value = reg_values[reg] & ((1 << 64) - 1)
+                        recipe = ('affine_linear', anchor_value, coefficient)
+                        if (
+                            _runtime_reg_recipe_value(CONCRETE_REPLAY_SP, recipe)
+                            != anchor_value
+                        ):
+                            break
+                    else:
+                        for reg, coefficient in coefficients.items():
+                            anchor_value = reg_values[reg] & ((1 << 64) - 1)
+                            reg_runtime_recipes[reg] = (
+                                'affine_linear',
+                                anchor_value,
+                                coefficient,
+                            )
+                            reg_runtime_accesses[reg] = ()
+                        if os.environ.get("RVMCA_DEBUG_REPAIR") == "1":
+                            DEBUG(f"joint_linear_runtime_recipes_selected {({
+                                'coefficients': {
+                                    reg.name: coefficient
+                                    for reg, coefficient in coefficients.items()
+                                },
+                                'affected_accesses': len(component_addresses),
+                            })}")
+
+            if not source_replacements:
+                install_joint_livein_recipes()
+                return
 
             coefficient_candidates = [
                 coefficient
