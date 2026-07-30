@@ -690,7 +690,7 @@ def find_unmappable_fixed_address_access(prog: Program):
         if kind == 'sext32':
             child = interval(expr[1])
             if child is None:
-                return None
+                return (-(1 << 31), (1 << 31) - 1)
             lo, hi = child
             if lo < -(1 << 31) or hi > (1 << 31) - 1:
                 return (-(1 << 31), (1 << 31) - 1)
@@ -711,12 +711,34 @@ def find_unmappable_fixed_address_access(prog: Program):
             factor = (1 << rhs[0]) if kind == 'slli' else rhs[0]
             products = (lhs[0] * factor, lhs[1] * factor)
             return (min(products), max(products))
+        if kind == 'srli':
+            rhs = interval(expr[2])
+            if rhs is None or rhs[0] != rhs[1]:
+                return None
+            shift = rhs[0]
+            if shift < 0 or shift >= 64:
+                return None
+            child = expr[1]
+            if isinstance(child, tuple) and child and child[0] == 'slli':
+                left_shift = interval(child[2])
+                if (
+                    left_shift is not None
+                    and left_shift[0] == left_shift[1]
+                    and 0 <= left_shift[0] < 64
+                ):
+                    mask = (1 << 64) - 1
+                    maximum = ((mask << left_shift[0]) & mask) >> shift
+                    return (0, maximum)
+            child_range = interval(child)
+            if child_range is not None and child_range[0] >= 0:
+                return (child_range[0] >> shift, child_range[1] >> shift)
+            return None
         return None
 
     def is_bounded_fixed_address_outside_stack(expr, access_width):
         if not expr_has(expr, 'fixed'):
             return False
-        if any(expr_has(expr, kind) for kind in ('sp', 'reg', 'unknown')):
+        if any(expr_has(expr, kind) for kind in ('sp', 'unknown')):
             return False
         addr_range = interval(expr)
         if addr_range is None:
@@ -975,8 +997,17 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
         find_reg_by_name(TEMP_REG2),
     )
 
-    def runtime_recipe_scratch_unavailable():
-        return all(reg in regs_undefined for reg in runtime_recipe_temp_regs)
+    def runtime_recipe_scratch_unavailable(target_symbol=None):
+        if not all(reg in regs_undefined for reg in runtime_recipe_temp_regs):
+            return False
+        if target_symbol is None:
+            return True
+        target_key = target_symbol.hash()
+        return not any(
+            reg_to_symbol.get(reg) is not None
+            and reg_to_symbol[reg].hash() == target_key
+            for reg in runtime_recipe_temp_regs
+        )
 
     # add dummy checking for undefined registers to avoid unconstrained symbol(regs_undefined>0)
     prog2se = add_undef_reg_checking(prog2se, list(regs_undefined))
@@ -2580,6 +2611,60 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             DEBUG(f'{final_state.history.events.hardcopy = }')
         solver = final_state.solver
         solver.add(final_state.regs.x0 == 0)
+
+    for (
+        first_inst,
+        first_addr,
+        _,
+        first_width,
+    ), (
+        second_inst,
+        second_addr,
+        _,
+        second_width,
+    ) in combinations(mem_accesses, 2):
+        delta_expr = claripy.simplify(first_addr - second_addr)
+        address_delta = concrete_expr_value(delta_expr)
+        if (
+            address_delta is None
+            and len(mem_accesses) < GLOBAL_NO_OVERLAP_LOAD_THRESHOLD
+            and getattr(first_addr, 'variables', set())
+            and getattr(first_addr, 'variables', set())
+            == getattr(second_addr, 'variables', set())
+        ):
+            delta_solver = solver.branch()
+            delta_solver.timeout = max(HEURISTIC_SOLVER_TIMEOUT_MS, 1000)
+            try:
+                delta_values = delta_solver.eval(delta_expr, 2)
+            except Exception:
+                delta_values = ()
+            if len(delta_values) == 1:
+                candidate_delta = delta_values[0] & ((1 << 64) - 1)
+                uniqueness_solver = solver.branch()
+                uniqueness_solver.timeout = max(
+                    HEURISTIC_SOLVER_TIMEOUT_MS,
+                    1000,
+                )
+                uniqueness_solver.add(
+                    delta_expr != claripy.BVV(candidate_delta, delta_expr.size())
+                )
+                try:
+                    if uniqueness_solver.satisfiable() is False:
+                        address_delta = candidate_delta
+                except Exception:
+                    pass
+        if address_delta is None:
+            continue
+        signed_delta = _signed_u64(address_delta)
+        minimum_delta = max(second_width, 1) - STACK_RANGE
+        maximum_delta = STACK_RANGE - max(first_width, 1)
+        if minimum_delta <= signed_delta <= maximum_delta:
+            continue
+        raise UnsupportedBlockError(
+            "no legal initial: fixed memory-access distance "
+            f"{signed_delta} between {first_inst.code} and {second_inst.code} "
+            f"exceeds the {STACK_RANGE}-byte replay stack"
+        )
 
     coupled_livein_vars = set()
     if use_static_memory_collection:
@@ -10987,7 +11072,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 divisor, const, multiplier, shifted_constraints = shifted
                 runtime_accesses = []
                 runtime_recipe_eligible = (
-                    not runtime_recipe_scratch_unavailable()
+                    not runtime_recipe_scratch_unavailable(symbol)
                 )
                 group_requirements = []
                 for other_inst, other_addr_symbol, other_idx, other_width in mem_accesses:
@@ -11228,7 +11313,7 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
 
                 runtime_recipe_eligible = (
                     runtime_stable_constraints(scaled_constraints)
-                    and not runtime_recipe_scratch_unavailable()
+                    and not runtime_recipe_scratch_unavailable(symbol)
                 )
                 # The expression proof must cover every address affected by
                 # this live-in.  A partial recipe would relocate only some of
@@ -19168,7 +19253,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             runtime_recipe = None
             if runtime_info is not None:
                 candidate_recipe = runtime_info['recipe']
-                if _runtime_reg_recipe_value(CONCRETE_REPLAY_SP, candidate_recipe) == val:
+                other_runtime_temp_has_recipe = (
+                    r in runtime_recipe_temp_regs
+                    and any(
+                        other_reg != r and other_reg in reg_runtime_recipes
+                        for other_reg in runtime_recipe_temp_regs
+                    )
+                )
+                if (
+                    not other_runtime_temp_has_recipe
+                    and _runtime_reg_recipe_value(
+                        CONCRETE_REPLAY_SP,
+                        candidate_recipe,
+                    ) == val
+                ):
                     runtime_recipe = candidate_recipe
                     reg_runtime_recipes[r] = candidate_recipe
                     reg_runtime_accesses[r] = runtime_info['accesses']
@@ -19247,7 +19345,10 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                 if reg not in runtime_recipe_temp_regs
             ] + [
                 reg for reg in regs_undefined
-                if reg in runtime_recipe_temp_regs
+                if reg in runtime_recipe_temp_regs and reg in reg_runtime_recipes
+            ] + [
+                reg for reg in regs_undefined
+                if reg in runtime_recipe_temp_regs and reg not in reg_runtime_recipes
             ]
             for reg in ordered_regs:
                 if reg not in reg_values:

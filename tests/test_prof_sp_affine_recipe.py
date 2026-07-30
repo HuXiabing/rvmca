@@ -797,6 +797,83 @@ def test_affine_quotient_initializes_livein_scratch_register_last(tmp_path):
             path.unlink(missing_ok=True)
 
 
+def test_affine_quotient_handles_both_scratch_registers_as_liveins(tmp_path):
+    asm_path = tmp_path / "affine_quotient_both_scratch_liveins.S"
+    asm_path.write_text(
+        "\n".join(
+            [
+                "addiw t4,s1,-1",
+                "slli a5,t4,0x20",
+                "slli a4,s11,0x5",
+                "srli t4,a5,0x1e",
+                "lui a2,0x3ae",
+                "addi a5,s3,844",
+                "lui a3,0x3ae",
+                "addi a1,a4,8",
+                "addi s6,a3,1088",
+                "add t4,t4,a5",
+                "addi a5,a2,840",
+                "sd a4,32(sp)",
+                "addiw t6,t6,0",
+                "add a1,s6,a1",
+                "sd a5,40(sp)",
+                "addi a2,a2,840",
+                "addi s4,s3,0",
+                "addi t5,zero,2",
+                "addi t0,zero,38",
+                "lw a4,8(a1)",
+                "slli a5,a4,0x4",
+                "sub a5,a5,a4",
+                "slli a5,a5,0x1",
+                "add a5,a5,s11",
+                "slli a5,a5,0x5",
+                "add a5,s6,a5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        Path(str(OUTPUT_PATH / asm_path.stem) + suffix)
+        for suffix in (
+            ".init",
+            ".code",
+            ".init.asm",
+            ".code.asm",
+            ".stage.json",
+            ".error",
+        )
+    ]
+
+    try:
+        transform_for_profiling(asm_path)
+        stage_path = Path(str(OUTPUT_PATH / asm_path.stem) + ".stage.json")
+        assert json.loads(stage_path.read_text(encoding="utf-8"))["stage"] == "transform:done"
+
+        init_asm = Path(
+            str(OUTPUT_PATH / asm_path.stem) + ".init.asm"
+        ).read_text(encoding="utf-8")
+        assert "divu x27, x27, x31" in init_asm
+
+        completed = subprocess.run(
+            [
+                "qemu-riscv64",
+                str(TOOLS_PATH / "pp" / "pp"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.init"),
+                str(OUTPUT_PATH / f"{asm_path.stem}.code"),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "cycles:" in completed.stdout
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+
 def test_affine_quotient_handles_add_before_power_of_two_scale(tmp_path):
     asm_path = tmp_path / "affine_quotient_add_then_shift.S"
     asm_path.write_text(

@@ -57,6 +57,57 @@ MAGIC_DIV_INDEX_BLOCK = [
     "ld a2,0(a4)",
 ]
 
+INCOMPATIBLE_ACCESS_DISTANCE_BLOCK = [
+    "addi s0,a4,0",
+    "ld a4,48(sp)",
+    "addi a5,zero,500",
+    "lui a3,0x1",
+    "mul a5,a4,a5",
+    "lw a4,200(s2)",
+    "addi a3,a3,403",
+    "ld a0,16(sp)",
+    "lui a1,0x7d2",
+    "addi a2,sp,428",
+    "addi a1,a1,-744",
+    "sw s0,240(s10)",
+    "addi a5,a5,1000",
+    "add a5,a5,a4",
+    "addi a4,a5,1499",
+    "add a5,a5,a3",
+    "ld a3,128(sp)",
+    "slli a5,a5,0x2",
+    "slli a4,a4,0x2",
+    "add a5,a3,a5",
+    "lw a5,0(a5)",
+    "add a4,a3,a4",
+    "lw a4,0(a4)",
+    "sd a5,64(sp)",
+    "addiw a5,s0,0",
+    "sd a5,80(sp)",
+    "sd a4,56(sp)",
+    "auipc ra,0x312",
+]
+
+BOUNDED_SHIFTED_INDEX_BLOCK = [
+    "lui a4,0x321",
+    "slli a2,a5,0x20",
+    "srli a5,a2,0x1e",
+    "addi a4,a4,-1752",
+    "add a5,a4,a5",
+    "lw a0,0(a5)",
+]
+
+BOUNDED_WORD_AFFINE_BLOCK = [
+    "lw a0,0(s1)",
+    "ld a5,144(sp)",
+    "addw s10,a5,a0",
+    "lui s11,0x17c6",
+    "addi s11,s11,-624",
+    "slli a1,s10,0x2",
+    "add a1,s11,a1",
+    "sw a5,4(a1)",
+]
+
 
 def _signed_u_imm(value):
     value &= (1 << 20) - 1
@@ -156,6 +207,43 @@ def test_magic_division_index_runs_with_legal_initial(tmp_path):
     finally:
         for path in generated_paths:
             path.unlink(missing_ok=True)
+
+
+def test_fixed_access_distance_beyond_replay_stack_is_skipped(tmp_path):
+    asm_path = tmp_path / "incompatible_access_distance.S"
+    asm_path.write_text(
+        "\n".join(INCOMPATIBLE_ACCESS_DISTANCE_BLOCK) + "\n",
+        encoding="utf-8",
+    )
+
+    result = transform_for_profiling(asm_path)
+
+    assert result.startswith("SKIP: no legal initial:")
+    assert "exceeds the 4096-byte replay stack" in result
+
+
+def test_bounded_shifted_index_outside_replay_stack_is_skipped(tmp_path):
+    asm_path = tmp_path / "bounded_shifted_index.S"
+    asm_path.write_text(
+        "\n".join(BOUNDED_SHIFTED_INDEX_BLOCK) + "\n",
+        encoding="utf-8",
+    )
+
+    result = transform_for_profiling(asm_path)
+
+    assert result.startswith("SKIP: unmappable fixed address access")
+
+
+def test_bounded_word_affine_address_outside_replay_stack_is_skipped(tmp_path):
+    asm_path = tmp_path / "bounded_word_affine.S"
+    asm_path.write_text(
+        "\n".join(BOUNDED_WORD_AFFINE_BLOCK) + "\n",
+        encoding="utf-8",
+    )
+
+    result = transform_for_profiling(asm_path)
+
+    assert result.startswith("SKIP: unmappable fixed address access")
 
 
 def test_multi_lui_address_family_runs_with_legal_initial(tmp_path):
