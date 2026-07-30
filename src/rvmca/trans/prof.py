@@ -9067,12 +9067,20 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
             complex_memory_block = len(mem_entries) >= STATIC_MEMORY_COLLECTION_ACCESS_THRESHOLD
             if complex_memory_block:
                 return
+            narrow_address_source_keys = {
+                (load_idx, expr_key(rd_symbol))
+                for load_inst, rd_symbol, _, load_idx in address_source_loads
+                if load_inst.width < 8
+            }
             pointer_entries = []
             scalar_entries = []
             for load_inst, rd_symbol, addr_symbol, load_idx in mem_entries:
                 if has_prior_same_addr_store(addr_symbol, load_idx, allow_solver=False):
                     continue
-                if is_scalar_zero_address_load(load_inst, rd_symbol, load_idx):
+                if (
+                    is_scalar_zero_address_load(load_inst, rd_symbol, load_idx)
+                    or (load_idx, expr_key(rd_symbol)) in narrow_address_source_keys
+                ):
                     scalar_entries.append((load_inst, addr_symbol, load_idx))
                     continue
                 if load_inst.width != 8:
@@ -22751,9 +22759,11 @@ def init_states_for_block(prog: Program, name: str, verbose: bool) -> List[Inst]
                     unsupported_runtime_source_vars.update(value_vars)
                     continue
 
+                load_addr_replacements = dict(base_replacements)
+                load_addr_replacements.update(source_replacements)
                 translated_load_addr = claripy.replace_dict(
                     load_addr_symbol,
-                    base_replacements,
+                    load_addr_replacements,
                 )
                 if not translation_identity(
                     translated_load_addr,
