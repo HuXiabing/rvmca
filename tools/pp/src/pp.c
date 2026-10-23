@@ -132,10 +132,6 @@ int main(int argc, char *argv[]) {
         // skip jump instruction
         if((encode & MASK_JALR) == MATCH_JALR || (encode & MASK_JAL) == MATCH_JAL)
             break;
-        if(encode == 0xc00027f3){
-            perror("Do not use the profiling instruction 'rdcycle a5'.\n");
-            return EXIT_FAILURE;
-        }
         (* insn_ptr) = encode;
         insn_ptr++;
     }

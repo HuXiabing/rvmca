@@ -3,28 +3,47 @@
 	.attribute arch, "rv64i2p1_m2p0_a2p1_f2p2_d2p2_zicsr2p0_zifencei2p0"
 	.attribute unaligned_access, 0
 	.attribute stack_align, 16
+	/* Preserve the initialized t6; only the timestamp lives across the block.
+	 * Both paths include the same store, load and nops in the timed interval.
+	 * The block must restore sp and leave the context/timing slots intact.
+	 */
+	.macro profile_count_start
+	sd t6, PROFILE_T6_SLOT(sp)
+	fence
+	__COUNT_START
+	sd t6, PROFILE_START_SLOT(sp)
+	ld t6, PROFILE_T6_SLOT(sp)
+	.rept PIPELINE_DEPTH
+	nop
+	.endr
+	fence
+	.endm
+
+	.macro profile_count_result
+	fence
+	ld t6, PROFILE_START_SLOT(sp)
+	sub a0, a0, t6
+	.endm
+
 	.section __profile, "axw"
 	.align	2
 	.globl	profile0
 	.type	profile0, @function
 profile0:
-	fence
-	__COUNT_START
-
-	.rept PIPELINE_DEPTH
-	nop
-	.endr
-
+	addi sp, sp, -PROFILE_SAVE_SIZE
+	addi sp, sp, -PROFILE_WORK_SIZE
+	profile_count_start
 	__COUNT_END
-	fence
-	sub	a0,a0,t6
+	profile_count_result
+	addi sp, sp, PROFILE_WORK_SIZE
+	addi sp, sp, PROFILE_SAVE_SIZE
 	ret
 	.globl	profileN
 	.globl  profile_insn_start, profile_insn_init
 	.type	profileN, @function
 profileN:
 	fence
-	addi sp, sp, -240
+	addi sp, sp, -PROFILE_SAVE_SIZE
 	sd s0, 0(sp)
 	sd s1, 8(sp)
 	sd s2, 16(sp)
@@ -52,27 +71,19 @@ profileN:
 	sd ra, 192(sp)
 	sd gp, 200(sp)
 	sd tp, 208(sp)
-	addi sp, sp, -0x400
+	addi sp, sp, -PROFILE_WORK_SIZE
 profile_insn_init:
 	.rept MAX_INSN
 	nop
 	.endr
-	fence
-	sd	t6, 1248(sp)
-	__COUNT_START
-	sd	t6, 1240(sp)
-	ld	t6, 1248(sp)
-	.rept PIPELINE_DEPTH
-	nop
-	.endr
+	profile_count_start
 profile_insn_start:
-	.rept MAX_INSN
+	/* Include a slot for the injected end counter at maximum block length. */
+	.rept MAX_INSN + 1
 	nop
 	.endr
-	fence
-	ld	t6, 1240(sp)
-	sub	a0,a0,t6
-	addi sp, sp, 0x400
+	profile_count_result
+	addi sp, sp, PROFILE_WORK_SIZE
 	ld s0, 0(sp)
 	ld s1, 8(sp)
 	ld s2, 16(sp)
@@ -100,5 +111,5 @@ profile_insn_start:
 	ld ra, 192(sp)
 	ld gp, 200(sp)
 	ld tp, 208(sp)
-	addi sp, sp, 240
+	addi sp, sp, PROFILE_SAVE_SIZE
 	ret
