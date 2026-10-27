@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2024 Xuezheng (xuezhengxu@126.com)
+# Copyright (c) 2024 Anonymous Authors (anonymous@example.invalid)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -33,8 +33,8 @@ all_tests = list_files(TESTS_INPUT_PATH / 'coremark-gcc14-O2', '.S')
 class TestProf:
 
     def test_one_case_with_name(self):
-        filepath = '/home/huxiabing/Documents/fail_coremark/test.S'
-        # filepath = '/home/huxiabing/Documents/with_mem/coremark2/19.S'
+        filepath = '/opt/artifact/Documents/fail_coremark/test.S'
+        # filepath = '/opt/artifact/Documents/with_mem/coremark2/19.S'
         self.test_one_case(filepath)
 
     @pytest.mark.parametrize('filepath', all_tests)
@@ -43,7 +43,7 @@ class TestProf:
 
     def test_400_perlbench(self):
         # directory = INPUT_PATH / 'spec06' / '400_perlbench'
-        directory = '/home/huxiabing/Documents/fail_coremark'
+        directory = '/opt/artifact/Documents/fail_coremark'
         for file in list_files(directory, '.S'):
             transform_for_profiling(file)
 
@@ -63,7 +63,7 @@ class TestProf:
         files = ['coremark2.json', 'git.json', 'gzip.json', 'sqlite3.json'] + polybench + spec06 + spec17
         # files = ['coremark.json']
         # for file in files:
-        #     filepath = '/home/huxiabing/Documents/raw_data(extract_from_app)/json/' + file
+        #     filepath = '/opt/artifact/Documents/raw_data(extract_from_app)/json/' + file
         #     with open(filepath, 'r') as f:
         #         blocks = json.load(f)
         #     success = 0
@@ -92,7 +92,7 @@ class TestProf:
         #
         #     print(f"\n运行完成：成功 {success} 个，失败 {failed} 个")
         for file in files:
-            filepath = '/home/huxiabing/Documents/raw_data(extract_from_app)/json/' + file
+            filepath = '/opt/artifact/Documents/raw_data(extract_from_app)/json/' + file
             with open(filepath, 'r') as f:
                 blocks = json.load(f)
             success = 0
@@ -153,14 +153,14 @@ class TestProf:
         files = ['git.json'] + polybench + spec06 + spec17
 
         for file in polybench:
-            filepath = '/home/huxiabing/Documents/raw_data(extract_from_app)/json/' + file
+            filepath = '/opt/artifact/Documents/raw_data(extract_from_app)/json/' + file
             with open(filepath, 'r') as f:
                 blocks = json.load(f)
             success = 0
             failed = 0
 
             # 创建结果文件并写入起始标记
-            result_filename = f'/home/huxiabing/Documents/rvmca/tests/{file[:-5]}_result.json'
+            result_filename = f'/opt/artifact/Documents/rvmca/tests/{file[:-5]}_result.json'
             with open(result_filename, 'w', encoding='utf-8') as result_file:
                 result_file.write('[\n')  # 开始JSON数组
 

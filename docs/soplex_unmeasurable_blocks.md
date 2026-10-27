@@ -6,7 +6,7 @@
 
 ## 共同背景：SVector 的头部布局
 
-源码：`/home/huxiabing/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/svector.h`
+源码：`/opt/artifact/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/svector.h`
 
 `SVector` 把实际元素指针 `m_elem` 指向 `elmem[1]`，并把 size/max 放在 `m_elem[-1]` 中：
 
@@ -57,7 +57,7 @@ sw   ..., -8(a5)
 
 函数：`soplex::DSVector::setMax(int)`
 
-源码：`/home/huxiabing/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/dsvector.cc:36`
+源码：`/opt/artifact/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/dsvector.cc:36`
 
 ```cpp
 void DSVector::setMax(int newmax)
@@ -79,7 +79,7 @@ void DSVector::setMax(int newmax)
 
 ### 对应反汇编
 
-反汇编文件：`/home/huxiabing/Documents/source_bb/spec06/SPEC2006/dis/450.soplex_soplex_base.riscv64.txt`
+反汇编文件：`/opt/artifact/Documents/source_bb/spec06/SPEC2006/dis/450.soplex_soplex_base.riscv64.txt`
 
 基本块入口在 `DSVector::setMax(int)+0x90`，即地址 `0x1572c`：
 
@@ -116,7 +116,7 @@ set_size(siz);
 
 函数：`soplex::SVSet::xtend(SVector&, int)`
 
-源码：`/home/huxiabing/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/svset.cc:131`
+源码：`/opt/artifact/Documents/source_bb/spec06/SPEC2006/benchspec/CPU2006/450.soplex/src/svset.cc:131`
 
 ```cpp
 void SVSet::xtend(SVector& svec, int newmax)
@@ -159,7 +159,7 @@ void SVSet::xtend(SVector& svec, int newmax)
 
 ### 对应反汇编
 
-反汇编文件：`/home/huxiabing/Documents/source_bb/spec06/SPEC2006/dis/450.soplex_soplex_base.riscv64.txt`
+反汇编文件：`/opt/artifact/Documents/source_bb/spec06/SPEC2006/dis/450.soplex_soplex_base.riscv64.txt`
 
 基本块入口在 `SVSet::xtend(SVector&, int)+0x20c`，即地址 `0x551dc`：
 

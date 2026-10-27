@@ -54,11 +54,11 @@ def test_onecase():
     print(result)
 
 def test_coremark():
-    filepath = '/home/huxiabing/Documents/raw_data(extract_from_app)/json_new/coremark.json'
+    filepath = '/opt/artifact/Documents/raw_data(extract_from_app)/json_new/coremark.json'
     success = 0
     failed = 0
 
-    result_filename = f'/home/huxiabing/Documents/se_result/coremark2.json'
+    result_filename = f'/opt/artifact/Documents/se_result/coremark2.json'
     with open(result_filename, 'w', encoding='utf-8') as result_file:
         result_file.write('[\n')
 
@@ -179,7 +179,7 @@ def process_single_block(block: Dict, idx: int) -> Dict[str, Any]:
 
 def test_coremark_batched():
     """批量处理的流式处理版本"""
-    filepath = '/home/huxiabing/Documents/rvmca/tests/spec06_pp_filtered.json'
+    filepath = '/opt/artifact/Documents/rvmca/tests/spec06_pp_filtered.json'
     result_filename = 'spec06_pp_filtered0427.json'
 
     # 批次大小配置

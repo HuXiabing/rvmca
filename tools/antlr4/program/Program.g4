@@ -13,7 +13,7 @@ label: LABEL ':' ';'?;
 // TODO: here is an workaround for 'or' inst parsing (actually it is a bug of current Antlr4)
 rfmt: (R_FMT_NAME REG ',' REG ',' REG) | ('or' REG ',' REG ',' REG);
 ifmt: I_FMT_NAME REG ',' REG ',' IMM ;
-// sw.rl /home/apr/tools/mappo/dataset/input/dataset_riscv_litmus/ATOMICS/RELAX/PodRWPX/LB+poprl+popx_has_ppo_0.litmus sw.rl
+// sw.rl /opt/artifact/tools/mappo/dataset/input/dataset_riscv_litmus/ATOMICS/RELAX/PodRWPX/LB+poprl+popx_has_ppo_0.litmus sw.rl
 //mfmt: (LD_NAME(MO_FLAG)? | SD_NAME(MO_FLAG)? | JALR) REG ',' IMM '(' REG ')' ;
 mfmt: (LD_NAME | SD_NAME | JALR) REG ',' IMM '(' REG ')' ;
 bfmt: B_FMT_NAME REG ',' REG ',' (LABEL | IMM);
@@ -89,6 +89,6 @@ fragment DIGIT : '0'..'9' ;
 LINE_COMMENT : '//' .*? '\r'? '\n' -> skip; // Match "//" stuff '\n'
 LINE_COMMENT2 : '#' .*? '\r'? '\n' -> skip; // Match "#" stuff '\n'
 COMMENT : '/*' .*? '*/' -> skip; // Match "/*" stuff "*/"
-// other comment /home/apr/tools/mappo/dataset/input/dataset_riscv_litmus_repair/HAND/LR-SC-diff-loc1_no_ppo_0.litmus
+// other comment /opt/artifact/tools/mappo/dataset/input/dataset_riscv_litmus_repair/HAND/LR-SC-diff-loc1_no_ppo_0.litmus
 OTHER_COMMENT : '(*' .*? '*)' -> skip; // Match "/*" stuff "*/"
 WS : [ \t\r\n]+ -> skip; // skip spaces, tabs, newlines

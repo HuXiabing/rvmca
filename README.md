@@ -1,47 +1,50 @@
 # RVMCA: RISC-V Machine Code Analyzer
 
-RVMCA provides parsing, analysis and transformation
-capabilities for RISC-V assembly code.
+This anonymous research artifact provides parsing, analysis, symbolic initial-state
+synthesis, and instruction scheduling for RISC-V basic blocks.
 
-# Requirements
+## Requirements
 
-## Python Packages
-
-- Python >= 3.11.5 
-
-You could run `pip install -r requirements.txt` to configure necessary packages by one click. 
-If pip fails in the process, use conda instead.
-
-## Patched Packages
-
-- vex (https://github.com/hahaxxz/vex)
+- Python 3.11 or newer and the packages in `requirements.txt`.
+- A RISC-V GNU/Linux compiler and objdump using the prefix
+  `riscv64-unknown-linux-gnu-`.
+- `qemu-riscv64` for local profiling.
+- The profiling harness under `tools/pp`.
 
 ```bash
-# check the version of pyvex
-pip list | grep pyvex
-# download pyvex
-# for example, get pyvex 9.2.125 in https://github.com/angr/pyvex/releases/tag/v9.2.125
-cd pyvex-9.2.125
-git clone https://github.com/hahaxxz/vex.git
-cd vex
-git checkout fix-riscv
-make -f Makefile-gcc
-cd ..
-pip uninstall pyvex
-pip install .
+python -m pip install -r requirements.txt
+make -C tools/pp
 ```
 
-## Quick Start
+The `vex` directory contains the supplied backend source. If rebuilding pyvex,
+use the supplied backend with the compatible pyvex source distribution. Backend
+support varies by version; floating-point synthesis is currently incomplete.
 
-```python
-# for profiling
-python src/rvmca/main.py -p input_file= tests/input/dv/test0.S
+## Usage
 
-# for scheduling
-python src/rvmca/main.py -rs input_file= tests/input/dv/test0.S -m 100
+Generate initialization code and QEMU measurements from a JSON array:
+
+```bash
+bash run_pp.sh /path/to/blocks.json -o /path/to/blocks_pp.json
 ```
 
-## Contributors
+Run the generated blocks on a RISC-V board:
 
-- Xuezheng (xuezhengxu@126.com)
-- Deheng (dehengyang@qq.com)
+```bash
+bash tools/pp/run_pp_hardware.sh /path/to/blocks_pp.json /path/to/results.json board
+```
+
+See [RUN_PP.md](RUN_PP.md) and the [hardware guide](tools/pp/RUN_PP_hardware.md)
+for dependencies, field definitions, and resuming interrupted runs.
+
+## Anonymous Review
+
+Personal project attribution, private repository URLs, development paths, and
+private board addresses have been redacted from the working files. Paths under
+`/opt/artifact` and URLs under `example.invalid` are placeholders; configure
+external datasets and board access for the local environment before running
+archived experiments.
+
+Third-party software retains its original license and attribution. Historical
+checksums describe the original experiment files and do not authenticate their
+redacted copies. Development Git metadata must be excluded from a review upload.

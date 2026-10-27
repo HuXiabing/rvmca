@@ -6,9 +6,9 @@
 
 - 冻结基线 HEAD：`aaabdf6 Add resumable SPEC06 profiling generator`
 - `prof.py` 最近功能提交：`fe8b0ab Fix valid initial state generation`
-- SPEC06 输入：`/home/huxiabing/Documents/raw_data/spec06/`
-- 当前输出：`/home/huxiabing/Documents/raw_data/spec06_pp/`
-- 汇总文件：`/home/huxiabing/Documents/raw_data/spec06_pp/_summary.json`
+- SPEC06 输入：`/opt/artifact/Documents/raw_data/spec06/`
+- 当前输出：`/opt/artifact/Documents/raw_data/spec06_pp/`
+- 汇总文件：`/opt/artifact/Documents/raw_data/spec06_pp/_summary.json`
 - 基本块总数：459580
 - 单块 timeout：300 秒
 - 并发数：2
@@ -83,7 +83,7 @@ PASS；其次处理 62 个 timeout。failed 转成 SKIP 不计入修复收益。
 - 禁止针对单个 block ID 写特例。
 - 禁止因为 solver 返回 unknown、搜索超时或启发式找不到值就标记 SKIP。
 - 禁止放宽 replay/QEMU 验证来制造假 PASS。
-- 禁止覆盖当前 `/home/huxiabing/Documents/raw_data/spec06_pp/` 基线结果。
+- 禁止覆盖当前 `/opt/artifact/Documents/raw_data/spec06_pp/` 基线结果。
 - 禁止只验证修复样例而不运行 2079 回归门。
 - 禁止提高并发后把资源争用造成的假 timeout 当真实失败。
 - 禁止把 `failed -> SKIP` 算作 PASS 改进，或用增加 SKIP 数量美化修复率。
@@ -449,15 +449,15 @@ PYTHONPATH=src python tests/test_all_failures.py \
 使用新目录，禁止覆盖基线：
 
 ```text
-/home/huxiabing/Documents/raw_data/spec06_pp_fixed_<git-short-sha>/
+/opt/artifact/Documents/raw_data/spec06_pp_fixed_<git-short-sha>/
 ```
 
 最终执行：
 
 ```bash
 PYTHONPATH=src python tests/generate_spec06_pp.py \
-  --input-dir /home/huxiabing/Documents/raw_data/spec06 \
-  --output-dir /home/huxiabing/Documents/raw_data/spec06_pp_fixed_<git-short-sha> \
+  --input-dir /opt/artifact/Documents/raw_data/spec06 \
+  --output-dir /opt/artifact/Documents/raw_data/spec06_pp_fixed_<git-short-sha> \
   --jobs 2 --timeout 300 --progress-every 100
 ```
 

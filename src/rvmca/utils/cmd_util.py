@@ -91,9 +91,9 @@ def clone_repo(url, repo_dir):
     """
     Example:
             repo_dir = os.path.join(cur_dir, 'litmus-tests-riscv')
-            url = "git@gitee.com:dehengyang/litmus-tests-riscv.git"
+            url = "https://example.invalid/anonymous/repository.git"
             if not os.path.exists(repo_dir):
-                start_ssh_cmd = r'eval "$(ssh-agent)" && ssh-add ~/.ssh/id_rsa_deheng_wsl'
+                start_ssh_cmd = r'eval "$(ssh-agent)" && ssh-add ~/.ssh/id_rsa'
                 Cmd_util.run_cmd(f"{start_ssh_cmd} && git clone {url} {repo_dir}")
     """
     cmd = f"""

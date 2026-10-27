@@ -19,8 +19,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
-DEFAULT_INPUT_DIR = Path("/home/huxiabing/Documents/raw_data/spec06")
-DEFAULT_BASELINE_DIR = Path("/home/huxiabing/Documents/raw_data/spec06_pp")
+DEFAULT_INPUT_DIR = Path("/opt/artifact/Documents/raw_data/spec06")
+DEFAULT_BASELINE_DIR = Path("/opt/artifact/Documents/raw_data/spec06_pp")
 DEFAULT_REPORT_DIR = TESTS_DIR / "failure_reports" / "spec06_aaabdf6_baseline"
 DEFAULT_JOBS = 2
 DEFAULT_TIMEOUT_S = 300

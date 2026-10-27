@@ -6,7 +6,7 @@ classified as SKIP without a reproducible UNSAT or method-boundary proof.
 
 ## Baseline Reconstruction (M0)
 
-- Frozen result baseline: `/home/huxiabing/Documents/raw_data/spec06_pp`
+- Frozen result baseline: `/opt/artifact/Documents/raw_data/spec06_pp`
 - Candidate set: 23,386 blocks whose three generated result fields are null
 - Frozen worker commit: `5dc85f7`
 - Execution parameters: `jobs=2`, `timeout=300`
@@ -238,7 +238,7 @@ repair it deterministically reaches the same alternate-SP
 until the ordering repair is applied.
 
 Direct `pytest` initially imported the adjacent legacy checkout at
-`/home/huxiabing/Documents/rvmca/src`, which could produce irrelevant results.
+`/opt/artifact/Documents/rvmca/src`, which could produce irrelevant results.
 `tests/conftest.py` now puts this checkout's `src` first, and
 `tests/test_import_path.py` locks that invariant. The long-running regression
 harnesses already applied the same path precedence independently.

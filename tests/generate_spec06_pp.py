@@ -29,8 +29,8 @@ from rvmca.config import OUTPUT_PATH, TOOLS_PATH
 from rvmca.trans.prof import transform_for_profiling
 
 
-DEFAULT_INPUT_DIR = Path("/home/huxiabing/Documents/raw_data/spec06")
-DEFAULT_OUTPUT_DIR = Path("/home/huxiabing/Documents/raw_data/spec06_pp")
+DEFAULT_INPUT_DIR = Path("/opt/artifact/Documents/raw_data/spec06")
+DEFAULT_OUTPUT_DIR = Path("/opt/artifact/Documents/raw_data/spec06_pp")
 DEFAULT_TIMEOUT_S = 300
 DEFAULT_JOBS = min(10, os.cpu_count() or 1)
 QEMU_TIMEOUT_S = 60

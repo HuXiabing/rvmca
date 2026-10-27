@@ -1,7 +1,7 @@
 # MIT License
 #
-# Copyright (c) 2023-2024 DehengYang (dehengyang@qq.com)
-#                         Xuezheng (xuezhengxu@126.com)
+# Copyright (c) 2023-2024 Anonymous Authors (anonymous@example.invalid)
+#                         Anonymous Authors (anonymous@example.invalid)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
