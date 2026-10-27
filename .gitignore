@@ -1,7 +1,11 @@
 .idea/
 __pycache__/
 .VSCodeCounter/
-
+in-place/
+docs/
+experiments/
+detect/
+tests/
 output/
 .vscode/
 dev.env

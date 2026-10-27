@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
     }else{
         int length = read_insns_from_file(file);
         fclose(file);
-        printf("<Init Code>:\n");
+        // printf("<Init Code>:\n");
 
         uint32_t *insn_ptr = &profile_insn_init;
 
@@ -102,7 +102,7 @@ int main(int argc, char *argv[]) {
 
         for(int k=0;k<length;k++){
             uint32_t encode = strtol(lines[k], NULL, 16);
-            printf("%s\n", lines[k]);
+            // printf("%s\n", lines[k]);
             (* insn_ptr) = encode;
             insn_ptr++;
         }
@@ -122,10 +122,10 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("\n<Block>:\n");
-    for(int k=0;k<length;k++){
-        printf("%s\n", lines[k]);
-    }
+    // printf("\n<Block>:\n");
+    // for(int k=0;k<length;k++){
+    //     printf("%s\n", lines[k]);
+    // }
     uint32_t *insn_ptr = &profile_insn_start;
     for(int k=0;k<length;k++){
         uint32_t encode = strtol(lines[k], NULL, 16);

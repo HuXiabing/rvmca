@@ -1,7 +1,0 @@
-ld a4,0(a5)
-ld a2,0(a4)
-ld a4,-952(gp)
-ld a3,-688(gp)
-sd zero,8(a2)
-ld a4,0(a4)
-sd s1,8(a4)
